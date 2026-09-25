@@ -51,4 +51,7 @@ add_executable(roomcorr_tests tests/tests.cpp)
 target_link_libraries(roomcorr_tests PRIVATE roomcorr_core)
 add_test(NAME dsp COMMAND roomcorr_tests)
 
+add_executable(roomcorr_bench tests/bench.cpp)
+target_link_libraries(roomcorr_bench PRIVATE roomcorr_core)
+
 install(TARGETS roomcorr RUNTIME DESTINATION bin)

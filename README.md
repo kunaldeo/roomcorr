@@ -89,6 +89,37 @@ to part of its name.
 - **Fast, native engine.** C++20, two-stage partitioned convolution with AVX-512:
   about 1% of one core while playing, nothing when silent, 5 ms of added latency.
 
+## DSP efficiency
+
+Three 262,144-tap correction filters (5.5 seconds each, 0.18 Hz resolution) would
+be a heavy load if convolved naively. roomcorr keeps the cost to about **1% of one CPU core**:
+
+| Measured on a Ryzen Threadripper 7980X, real-time paced (`build/roomcorr_bench`) | Audio thread | Worker threads | Total |
+|---|---|---|---|
+| Playing music | 0.8% | 0.5% | **1.3% of one core** |
+| Silence (after ~6 s) | 0.2% | 0% | **0.2%** |
+| Earlier single-stage version, playing | 3.5% (5–15% live) | — | 3.5–15% |
+
+How:
+
+- **Two-stage partitioned convolution.** The first 16,384 taps of each filter
+  run on PipeWire's realtime thread in 256-sample FFT partitions (5.3 ms of
+  latency). The long tail runs on a worker thread in 8,192-sample partitions,
+  which is about 30× fewer multiplies per sample for that part of the filter. Because the tail starts two
+  blocks into the filter, the worker has a full 170 ms of slack for each block,
+  so the audio thread never waits for it. The output is identical to one big
+  convolution.
+- **AVX-512.** The frequency-domain multiply-accumulate is written so the
+  compiler vectorizes it with 512-bit instructions; FFTs use FFTW.
+- **Idle skip.** When a channel's input has been silent longer than its filter's
+  memory, it clears its state once and does no work until sound returns.
+- **No slow paths.** Denormal floats are flushed to zero, filter swaps are
+  lock-free with a crossfade, and the audio thread never allocates memory or blocks.
+
+The engine reports its load, idle channels and any late worker blocks (always 0
+so far) in the Studio's Engine panel, so you can check this on your own machine.
+Since the cost is per core and this small, a laptop has plenty of headroom too.
+
 ## Room Correction Studio
 
 | Response vs target | Time & phase alignment |
