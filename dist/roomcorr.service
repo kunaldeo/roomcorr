@@ -1,0 +1,14 @@
+[Unit]
+Description=Room correction and bass management (roomcorr)
+After=pipewire.service wireplumber.service
+Requires=pipewire.service
+PartOf=pipewire.service
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/roomcorr daemon
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=pipewire.service
