@@ -10,6 +10,20 @@ benefits, and a studio app lets you watch it work live.
 
 ![Room Correction Studio — live view](docs/screenshots/studio-live.png)
 
+## Why I built this
+
+After upgrading my home theater I had some good gear left over: a pair of
+Boston Acoustics bookshelf speakers, a Polk subwoofer and a Marantz amp. I set
+them up on my desk, and they sounded pretty bad. The first measurement showed
+why: a room boom around 125 Hz about 15 dB above the rest, bass that came and
+went depending on the note, and a sub that didn't blend with the speakers at
+all. A modern AV receiver with Dirac Live fixes exactly this, but I wanted it
+on the computer, for everything I play.
+
+So I built roomcorr. After calibration the same speakers measure within a few
+dB of the Harman target from 30 Hz up, and the sub and speakers finally
+sound like one system.
+
 ## My setup (example)
 
 <table>
@@ -26,15 +40,7 @@ benefits, and a studio app lets you watch it work live.
 
 ### Connections
 
-```mermaid
-flowchart LR
-    PC["Laptop / desktop<br/>Linux + PipeWire<br/>roomcorr"] -->|USB| X4["Sound Blaster X4<br/>(Super X-Fi)"]
-    X4 -->|"Front out · 3.5 mm → 2× RCA<br/>(white = L, red = R)"| AMP["Marantz PM6003<br/>line input (e.g. CD)"]
-    AMP -->|speaker wire| L["Boston A 26 · left"]
-    AMP -->|speaker wire| R["Boston A 26 · right"]
-    X4 -->|"C/Sub out · 3.5 mm → 2× RCA<br/>red plug only (LFE)"| SUB["Polk HTS 10<br/>LFE / line in"]
-    MIC["UMIK-1<br/>(for calibration)"] -->|USB| PC
-```
+<img src="docs/connections.svg" alt="Connection diagram: desktop to Sound Blaster X4 over USB; X4 Front out to the Marantz amp and on to the speakers; X4 C/Sub out, red plug, to the Polk subwoofer LFE input; UMIK-1 to the desktop for calibration" width="100%">
 
 | From (Sound Blaster X4, back) | Cable | To |
 |---|---|---|
