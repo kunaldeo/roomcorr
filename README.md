@@ -37,6 +37,11 @@ are 32-bit float WAVs, so REW can open them.
 1. **Levels.** Pink-noise bursts raise the test level until the mic reads 75 dB SPL
    (or 45 dB over the room noise). The wizard then finds which wire of the C/Sub jack
    the sub is on, after a few seconds of bass to wake the Polk from auto-standby.
+   If the sub's volume knob is far off, a **live sub level** meter takes over, as on
+   an AV receiver: continuous bass noise, a reading 3× a second, and "turn the knob
+   UP/DOWN · N dB to go" until it sits in the green zone. The target leaves the sub
+   needing about −3 dB of digital trim, so the Sub level slider has room both ways.
+   `roomcorr sublevel` (or **Adjust sub level only** in the Studio) runs just this step.
 2. **Measurement.** Log sweeps play left, right, then sub, back to back in one run at
    each mic position. Keeping all three in one run keeps their relative timing exact.
 3. **Analysis.** Deconvolution, frequency-dependent windowing (15 cycles),

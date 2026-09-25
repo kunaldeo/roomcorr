@@ -16,6 +16,7 @@ int run_design(int argc, char** argv);
 int run_verify(int argc, char** argv);
 int run_setup(int argc, char** argv);
 int run_probe(int argc, char** argv);
+int run_sublevel(int argc, char** argv);
 }  // namespace rc
 
 using namespace rc;
@@ -30,6 +31,7 @@ static void usage() {
       "  roomcorr calibrate [--positions N] [--mic-cal FILE] [--yes]\n"
       "                                  measure with the UMIK-1 and build filters\n"
       "  roomcorr verify                 measure the corrected system\n"
+      "  roomcorr sublevel [--json]      live subwoofer knob adjustment (reading 3x a second)\n"
       "  roomcorr probe OUTS [DBFS]      noise burst on X4 outputs (FL,FR,FC,LFE,...), report mic level\n"
       "  roomcorr design [--measurement DIR]\n"
       "                                  rebuild filters from saved measurements (e.g. after a target change)\n"
@@ -124,6 +126,7 @@ int main(int argc, char** argv) {
     if (cmd == "setup") return run_setup(argc - 2, argv + 2);
     if (cmd == "ctl") return run_ctl(argc - 2, argv + 2);
     if (cmd == "probe") return run_probe(argc - 2, argv + 2);
+    if (cmd == "sublevel") return run_sublevel(argc - 2, argv + 2);
     if (cmd == "studio") return run_studio(argc - 2, argv + 2);
     if (cmd == "-h" || cmd == "--help" || cmd == "help") {
       usage();

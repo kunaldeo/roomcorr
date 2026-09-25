@@ -1,5 +1,6 @@
 // Interactive calibration wizard plus the `design`, `verify` and `setup`
 // commands. Runs in a terminal; the Omarchy plugin launches it in one.
+#include <poll.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -409,6 +410,86 @@ void print_design(const DesignResult& r) {
 
 }  // namespace
 
+// Compares the sub's sensitivity with the mains' and, if it's off, runs
+// the live knob adjustment (continuous bass noise, readings 3x a second)
+// until the user says done. Updates sub_level/sub_spl for the sweeps.
+void sub_level_session(const Config& cfg, const std::string& dev, const std::string& mic_name, const MicCal& cal,
+                       const std::vector<std::string>& sub_outs, double main_level, double main_spl, double floor_sub,
+                       double& sub_level, double& sub_spl, bool force_live = false) {
+  const std::string* mic = &mic_name;
+  // Sensitivity difference: how much louder the sub plays than a main
+  // speaker for the same signal. Aim for the house curve's bass lift minus
+  // a little, which leaves the sub needing ~-3 dB of digital trim: room for
+  // the Sub level slider both ways, and no digital boost.
+  const double kSubTarget = std::clamp(cfg.target.bass_boost_db - 0.5, 0.0, 12.0), kSubWindow = 2.0;
+  auto sub_diff = [&](double spl) { return (spl - sub_level) - (main_spl - main_level); };
+  auto report_balance = [&](double diff, bool live) {
+    const double off = diff - kSubTarget;
+    const bool ok = std::fabs(off) <= kSubWindow;
+    if (g_json) {
+      Json e = event(live ? "sub_live" : "sub_balance");
+      e["diff_db"] = diff;
+      e["target_db"] = kSubTarget;
+      e["window_db"] = kSubWindow;
+      e["offset_db"] = off;
+      e["direction"] = ok ? "ok" : off > 0 ? "down" : "up";
+      e["ok"] = ok;
+      emit(e);
+      return;
+    }
+    std::string arrow = ok ? green("✓ in range") : off > 0 ? yellow("▼ turn the sub's knob DOWN") : yellow("▲ turn the sub's knob UP");
+    out("%s  Sub vs mains %s dB   target %s ±%.0f   %s %s   %s", live ? "\r" : "  ", f1("%+5.1f", diff).c_str(),
+        f1("%+.1f", kSubTarget).c_str(), kSubWindow, arrow.c_str(), ok ? "" : f1("(%.1f dB to go)", std::fabs(off)).c_str(),
+        live ? dim("Enter = done   ").c_str() : "\n");
+  };
+  double diff = sub_diff(sub_spl);
+  report_balance(diff, false);
+  bool adjust = force_live || std::fabs(diff - kSubTarget) > kSubWindow;
+  if (adjust && !g_auto) {
+    if (!g_json) out("  %s\n", "Live sub level: turn the knob on the back of the sub until it says in range.");
+    if (g_json) {
+      Json e = event("prompt");
+      e["kind"] = "sub_live";
+      e["text"] = "Adjust the subwoofer's volume knob until the meter is in the green zone, then press Done.";
+      emit(e);
+    }
+    auto noise = pink_noise(1 << 17, 30, 90, kSampleRate, 11);  // 2.7 s seamless loop
+    const double rms = std::pow(10.0, (sub_level - 3.0103) / 20);
+    std::vector<float> loop(noise.size());
+    for (size_t i = 0; i < noise.size(); ++i) loop[i] = float(noise[i] * rms);
+    MeasureRequest live;
+    live.play_target = dev;
+    live.positions = kX4Positions;
+    live.capture_target = *mic;
+    for (const auto& p : kX4Positions)
+      live.signal.push_back(std::find(sub_outs.begin(), sub_outs.end(), p) != sub_outs.end() ? loop
+                                                                                            : std::vector<float>(loop.size(), 0.f));
+    if (g_daemon_muted) daemon_quiet(600);
+    // Band-limited noise measured over a short window wobbles by a dB or
+    // so; average in the power domain so the needle settles quickly but
+    // doesn't twitch.
+    double avg_power = -1;
+    run_live(live, 300, 1.5, [&](const std::vector<double>& recent) {
+      double p = std::pow(10.0, band_level_dbfs(recent, 30, 90, kSampleRate) / 10);
+      avg_power = avg_power < 0 ? p : 0.6 * avg_power + 0.4 * p;
+      sub_spl = cal.spl(10 * std::log10(avg_power));
+      report_balance(sub_diff(sub_spl), true);
+      pollfd pfd{0, POLLIN, 0};
+      if (poll(&pfd, 1, 0) > 0) {
+        read_answer();
+        return false;
+      }
+      return true;
+    });
+    if (!g_json) out("\n");
+    diff = sub_diff(sub_spl);
+    report_balance(diff, false);
+    // The knob moved: re-take the sub's test level for good sweep SNR.
+    out("  Re-checking the sub level:\n");
+    sub_level = auto_level(dev, *mic, cal, sub_outs, 30, 90, 75, floor_sub, &sub_spl, "sub");
+  }
+}
+
 // ------------------------------------------------------------------ calibrate
 
 static int calibrate_impl(int argc, char** argv) {
@@ -515,30 +596,7 @@ static int calibrate_impl(int argc, char** argv) {
   double main_level = auto_level(dev, *mic, cal, {"FL"}, 200, 4000, 75, floor_main, &main_spl, "mains");
   out("  Subwoofer:\n");
   double sub_level = auto_level(dev, *mic, cal, sub_outs, 30, 90, 75, floor_sub, &sub_spl, "sub");
-  // Sensitivity difference: how much louder the sub plays than a main
-  // speaker for the same signal.
-  while (true) {
-    double diff = (sub_spl - sub_level) - (main_spl - main_level);
-    if (g_json) {
-      Json e = event("sub_balance");
-      e["diff_db"] = diff;
-      e["ok"] = diff >= -3 && diff <= 9;
-      emit(e);
-    }
-    out("  Sub vs main speaker at the same signal level: %s dB\n", f1("%+.1f", diff).c_str());
-    if (diff >= -3 && diff <= 9) {
-      out("  %s\n", green("Sub volume knob is in a good range.").c_str());
-      break;
-    }
-    out("  %s\n", yellow(diff < -3 ? "The sub is quiet: turn its volume knob UP a little."
-                                      : "The sub is very loud: turn its volume knob DOWN a little.")
-                         .c_str());
-    if (g_auto) break;
-    std::string a = ask(dim("› Adjust the knob, then Enter to re-check (or 's' to skip):"));
-    if (!a.empty() && (a[0] == 's' || a[0] == 'S')) break;
-    Burst b = noise_burst(dev, *mic, sub_outs, sub_level, 30, 90);
-    sub_spl = cal.spl(b.mic_dbfs);
-  }
+  sub_level_session(cfg, dev, *mic, cal, sub_outs, main_level, main_spl, floor_sub, sub_level, sub_spl);
   const double main_amp = std::min(0.5, std::pow(10.0, main_level / 20));
   const double sub_amp = std::min(0.5, std::pow(10.0, sub_level / 20));
 
@@ -644,6 +702,52 @@ static int calibrate_impl(int argc, char** argv) {
   return 0;
 }
 
+// ------------------------------------------------------------------ sublevel
+
+static int finish(int rc, const char* error = nullptr);
+
+// roomcorr sublevel [--json]: just the live subwoofer knob adjustment.
+static int sublevel_impl() {
+  Config cfg = load_config();
+  auto mic = find_mic(cfg);
+  if (!mic || cfg.output_device.empty()) {
+    out("%s\n", red("Needs the UMIK-1 and `roomcorr setup`.").c_str());
+    return 1;
+  }
+  MicCal cal = load_cal_or_die(cfg);
+  signal(SIGINT, on_interrupt);
+  signal(SIGHUP, on_interrupt);
+  signal(SIGPIPE, on_interrupt);
+  if (daemon_quiet(120)) g_daemon_muted = true;
+  const std::string& dev = cfg.output_device;
+  step(1, "Room noise");
+  double floor_main = silence_level(dev, *mic, 200, 4000), floor_sub = silence_level(dev, *mic, 30, 90);
+  step(2, "Reference levels");
+  out("  Mains (left):\n");
+  double main_spl = 0, sub_spl = 0;
+  double main_level = auto_level(dev, *mic, cal, {"FL"}, 200, 4000, 75, floor_main, &main_spl, "mains");
+  out("  Subwoofer:\n");
+  noise_burst(dev, *mic, cfg.sub_outputs, -30, 30, 90, 3.0);  // wake from standby
+  double sub_level = auto_level(dev, *mic, cal, cfg.sub_outputs, 30, 90, 75, floor_sub, &sub_spl, "sub");
+  step(3, "Sub level");
+  sub_level_session(cfg, dev, *mic, cal, cfg.sub_outputs, main_level, main_spl, floor_sub, sub_level, sub_spl, true);
+  restore();
+  out("  %s\n", dim("If the knob moved, recalibrate (or at least rebuild) so the sub trim matches.").c_str());
+  return 0;
+}
+
+int run_sublevel(int argc, char** argv) {
+  for (int i = 0; i < argc; ++i)
+    if (std::string(argv[i]) == "--json") g_json = true;
+  try {
+    return finish(sublevel_impl());
+  } catch (const std::exception& e) {
+    restore();
+    out("%s\n", e.what());
+    return finish(1, e.what());
+  }
+}
+
 // ------------------------------------------------------------------ probe
 
 // roomcorr probe OUT[,OUT...] [LEVEL_DBFS] [F_LO F_HI]
@@ -685,7 +789,7 @@ int run_probe(int argc, char** argv) {
 
 // Entry points: in --json mode always finish with {"ev":"done"} so the
 // Studio knows the run ended, however it ended.
-static int finish(int rc, const char* error = nullptr) {
+static int finish(int rc, const char* error) {
   if (g_json) {
     Json e = event("done");
     e["ok"] = rc == 0;

@@ -6,6 +6,7 @@
 // whole position (left, right, sub) is measured as a single run.
 #pragma once
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -25,5 +26,12 @@ struct MeasureResult {
 };
 
 MeasureResult run_measurement(const MeasureRequest& req);  // throws
+
+// Live mode: loops `signal` (per channel, seamless loop) on the outputs and
+// calls `tick` every interval_ms with the last `window_s` seconds of mic
+// signal, until tick returns false. Fades in and out so the sub doesn't
+// thump. Used for the live subwoofer level adjustment.
+void run_live(const MeasureRequest& req, int interval_ms, double window_s,
+              const std::function<bool(const std::vector<double>& recent)>& tick);  // throws
 
 }  // namespace rc

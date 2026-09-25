@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import Quickshell
 import Quickshell.Io
 
 // Graphical calibration: drives `roomcorr calibrate --json` and shows
@@ -18,6 +19,8 @@ Item {
   property var noise: null
   property var subDetect: []
   property var subBalance: null
+  property var subLive: null           // live sub-level reading while adjusting
+  property string logText: ""
   property int curPos: 0
   property int posOf: 0
   property string posHint: ""
@@ -28,19 +31,29 @@ Item {
   property var verify: null
   property var result: null            // { ok, error }
 
-  readonly property var stepNames: ["Devices", "Before we start", "Room noise", "Find the subwoofer", "Levels", "Measure", "Design filters", "Verify"]
+  property string mode: "calibrate"   // or "sublevel"
+  readonly property var stepNames: mode === "sublevel"
+      ? ["Room noise", "Reference levels", "Sub level"]
+      : ["Devices", "Before we start", "Room noise", "Find the subwoofer", "Levels", "Measure", "Design filters", "Verify"]
   // Mic offsets for the position hints (cm; -y is toward the speakers).
   readonly property var posOffsets: [[0, 0], [-30, 0], [30, 0], [0, -30], [0, 30], [-20, 0], [20, 0], [-20, -20], [20, 20]]
 
-  ListModel { id: logModel }
 
   function reset() {
     step = 0; prompt = null; levels = {}; noise = null; subDetect = []; subBalance = null
     curPos = 0; posOf = positions; posHint = ""; posResults = {}; design = null; verify = null; result = null
-    logModel.clear()
+    logText = ""
+    subLive = null
+  }
+  function startSubLevel() {
+    reset()
+    mode = "sublevel"
+    proc.command = ["roomcorr", "sublevel", "--json"]
+    proc.running = true
   }
   function start() {
     reset()
+    mode = "calibrate"
     proc.command = ["roomcorr", "calibrate", "--json", "--positions", String(positions)]
     proc.running = true
   }
@@ -58,20 +71,24 @@ Item {
     if (verifyProc.running) verifyProc.signal(15)
   }
 
+  function addLog(t) {
+    var lines = (logText === "" ? [] : logText.split("\n")).concat([t])
+    if (lines.length > 500) lines = lines.slice(lines.length - 500)
+    logText = lines.join("\n")
+  }
+
   function handle(line) {
     var e
-    try { e = JSON.parse(line) } catch (x) { logModel.append({ line: line, tone: "plain" }); return }
+    try { e = JSON.parse(line) } catch (x) { addLog(line); return }
     switch (e.ev) {
-    case "log":
-      logModel.append({ line: e.text, tone: "plain" })
-      if (logModel.count > 400) logModel.remove(0)
-      break
+    case "log": addLog(e.text); break
+    case "sub_live": subLive = e; break
     case "step": step = e.n; if (e.n === 6) posOf = page.positions; break
     case "prompt": prompt = e; break
     case "level": { var l = Object.assign({}, levels); l[e.what] = e; levels = l; break }
     case "noise": noise = e; break
     case "sub_detect": subDetect = subDetect.concat([e]); break
-    case "sub_balance": subBalance = e; break
+    case "sub_balance": subBalance = e; if (prompt && prompt.kind === "sub_live") prompt = null; subLive = null; break
     case "position": curPos = e.n; posOf = e.of; posHint = e.hint; break
     case "measuring": measureSeconds = e.seconds; measureLeft = e.seconds; break
     case "snr": { var r = Object.assign({}, posResults); r[e.position] = e; posResults = r; measureLeft = 0; break }
@@ -85,14 +102,14 @@ Item {
     id: proc
     stdinEnabled: true
     stdout: SplitParser { onRead: function(l) { page.handle(l) } }
-    stderr: SplitParser { onRead: function(l) { logModel.append({ line: l, tone: "err" }) } }
+    stderr: SplitParser { onRead: function(l) { page.addLog("! " + l) } }
   }
   Process {
     id: verifyProc
     command: ["roomcorr", "verify", "--json"]
     stdinEnabled: true
     stdout: SplitParser { onRead: function(l) { page.handle(l) } }
-    stderr: SplitParser { onRead: function(l) { logModel.append({ line: l, tone: "err" }) } }
+    stderr: SplitParser { onRead: function(l) { page.addLog("! " + l) } }
   }
   Timer {
     interval: 200
@@ -156,6 +173,22 @@ Item {
           icon: page.running ? "\u{f04d}" : "\u{f130}"
           tint: page.running ? page.theme.red : page.theme.accent
           onClicked: page.running ? page.stop() : page.start()
+        }
+        SButton {
+          width: parent.width
+          theme: page.theme
+          text: "Adjust sub level only"
+          icon: "\u{f04c3}"
+          enabled: !page.running
+          onClicked: page.startSubLevel()
+        }
+        Text {
+          width: parent.width
+          wrapMode: Text.WordWrap
+          text: "Live meter for the sub's volume knob, like an AV receiver's level setup. Recalibrate afterwards if you moved the knob."
+          color: page.theme.muted
+          font.family: page.theme.font
+          font.pixelSize: 10
         }
       }
 
@@ -231,7 +264,8 @@ Item {
             wrapMode: Text.WordWrap
             text: page.prompt ? page.prompt.text
                 : page.measureLeft > 0 ? "Measuring position " + page.curPos + "… stay quiet (" + Math.ceil(page.measureLeft) + " s)"
-                : page.result ? (page.result.ok ? "Done. The new correction is active." : "Stopped: " + (page.result.error || "see log"))
+                : page.result ? (page.result.ok ? (page.mode === "sublevel" ? "Sub level set. Recalibrate (or Rebuild filters) so the correction matches the new knob position." : "Done. The new correction is active.")
+                                                : "Stopped: " + (page.result.error || "see log"))
                 : page.running ? (page.step > 0 ? page.stepNames[page.step - 1] + "…" : "Starting…")
                 : "Ready. Choose the number of mic positions and press Start."
             color: page.theme.fg
@@ -259,9 +293,61 @@ Item {
               color: page.theme.accent
             }
           }
+          // Live subwoofer level: needle against the target zone.
+          Column {
+            visible: !!page.prompt && page.prompt.kind === "sub_live"
+            width: parent.width
+            spacing: 8
+            readonly property var r: page.subLive
+            readonly property real off: r ? r.offset_db : 0
+            readonly property real win: r ? r.window_db : 2
+            Text {
+              text: !parent.r ? "Listening…"
+                  : parent.r.direction === "ok" ? "✓  In range. Leave the knob here."
+                  : (parent.r.direction === "down" ? "▼  Turn the sub's volume knob DOWN" : "▲  Turn the sub's volume knob UP")
+                    + "   ·   " + Math.abs(parent.off).toFixed(1) + " dB to go"
+              color: !parent.r ? page.theme.muted : parent.r.direction === "ok" ? page.theme.green : page.theme.yellow
+              font.family: page.theme.font
+              font.pixelSize: 22
+              font.bold: true
+            }
+            Item {
+              width: parent.width
+              height: 46
+              readonly property real range: 12   // dB each side
+              function xAt(v) { return (Math.max(-range, Math.min(range, v)) + range) / (2 * range) * width }
+              Rectangle { y: 14; width: parent.width; height: 14; radius: 7; color: page.theme.alpha(page.theme.fg, 0.08) }
+              Rectangle {
+                y: 14; height: 14; radius: 7
+                x: parent.xAt(-parent.parent.win); width: parent.xAt(parent.parent.win) - x
+                color: page.theme.alpha(page.theme.green, 0.45)
+              }
+              Rectangle {
+                width: 4; height: 34; y: 4; radius: 2
+                x: parent.xAt(parent.parent.off) - 2
+                color: parent.parent.r && parent.parent.r.direction === "ok" ? page.theme.green : page.theme.yellow
+                Behavior on x { NumberAnimation { duration: 250; easing.type: Easing.OutCubic } }
+              }
+              Text { y: 32; x: 0; text: "sub too quiet"; color: page.theme.muted; font.family: page.theme.font; font.pixelSize: 10 }
+              Text { y: 32; x: parent.width / 2 - width / 2; text: "target"; color: page.theme.green; font.family: page.theme.font; font.pixelSize: 10 }
+              Text { y: 32; x: parent.width - width; text: "sub too loud"; color: page.theme.muted; font.family: page.theme.font; font.pixelSize: 10 }
+            }
+            Text {
+              text: parent.r ? "Sub vs mains " + (parent.r.diff_db > 0 ? "+" : "") + parent.r.diff_db.toFixed(1) + " dB  ·  target +"
+                               + parent.r.target_db.toFixed(1) + " ± " + parent.r.window_db.toFixed(0) + " dB. Small turns: the reading updates 3× a second." : ""
+              color: page.theme.muted
+              font.family: page.theme.font
+              font.pixelSize: 11
+            }
+          }
           Row {
             visible: !!page.prompt
             spacing: 8
+            SButton {
+              visible: !!page.prompt && page.prompt.kind === "sub_live"
+              theme: page.theme; primary: true; text: "Done"; icon: "\u{f00c}"
+              onClicked: page.answer("")
+            }
             SButton {
               visible: !!page.prompt && page.prompt.kind === "continue"
               theme: page.theme; primary: true; text: "Continue"; icon: "\u{f04b}"
@@ -418,22 +504,45 @@ Item {
           title: "Log"
           Layout.fillWidth: true
           Layout.fillHeight: true
-          ListView {
-            id: logView
+          Row {
+            spacing: 6
+            SButton {
+              theme: page.theme
+              text: copied.running ? "Copied" : "Copy log"
+              icon: "\u{f0c5}"
+              enabled: page.logText !== ""
+              onClicked: { Quickshell.clipboardText = page.logText; copied.restart() }
+              Timer { id: copied; interval: 1500 }
+            }
+            SButton {
+              theme: page.theme
+              text: "Clear"
+              enabled: page.logText !== "" && !page.running
+              onClicked: page.logText = ""
+            }
+          }
+          Flickable {
+            id: logFlick
             width: parent.width
-            height: Math.max(120, page.height - 520)
+            height: Math.max(120, page.height - 560)
             clip: true
-            model: logModel
-            onCountChanged: positionViewAtEnd()
-            delegate: Text {
-              required property string line
-              required property string tone
-              width: logView.width
-              wrapMode: Text.WordWrap
-              text: line
-              color: tone === "err" ? page.theme.red : page.theme.fgLight
+            contentHeight: logEdit.contentHeight
+            boundsBehavior: Flickable.StopAtBounds
+            function toEnd() { contentY = Math.max(0, contentHeight - height) }
+            TextEdit {
+              id: logEdit
+              width: logFlick.width
+              readOnly: true
+              selectByMouse: true
+              persistentSelection: true
+              wrapMode: TextEdit.Wrap
+              text: page.logText
+              color: page.theme.fgLight
+              selectionColor: page.theme.alpha(page.theme.accent, 0.4)
+              selectedTextColor: page.theme.fg
               font.family: page.theme.font
               font.pixelSize: 11
+              onTextChanged: Qt.callLater(logFlick.toEnd)
             }
           }
         }
