@@ -53,6 +53,7 @@ EngineParams EngineParams::from_config(const Config& c) {
 Engine::Engine() {
   for (auto& c : conv_) c = std::make_unique<Convolver>(kBlock, kMaxTaps);
   for (auto& d : delay_buf_) d.assign(kDelayMask + 1, 0.f);
+  for (auto& t : tap_) t.assign(kTapSize, 0.f);
   // The LFE channel is band-limited to 120 Hz by convention; filter it
   // there regardless of the crossover.
   lfe_lp_.configure(24, false, 120, kSampleRate);
@@ -97,6 +98,14 @@ EngineStats Engine::read_stats() {
   s.clipped = clipped_.load();
   s.load = load_.exchange(0);
   return s;
+}
+
+void Engine::read_tap(int tap, float* dst, int n) const {
+  // The audio thread may overwrite the oldest samples while we copy; for a
+  // display that's harmless.
+  uint32_t end = tap_pos_.load(std::memory_order_acquire);
+  const auto& t = tap_[tap];
+  for (int i = 0; i < n; ++i) dst[i] = t[(end - uint32_t(n) + uint32_t(i)) & (kTapSize - 1)];
 }
 
 void Engine::apply_params(const EngineParams& p) {
@@ -274,11 +283,17 @@ void Engine::process_block() {
       pk[c] = std::max(pk[c], std::fabs(v[c]));
       sq[c] += v[c] * v[c];
     }
+    const uint32_t tp = (tap_pos_.load(std::memory_order_relaxed) + uint32_t(s)) & (kTapSize - 1);
+    tap_[kTapIn][tp] = 0.5f * (in_blk_[kOutFL][s] + in_blk_[kOutFR][s]);
+    tap_[kTapLeft][tp] = float(v[kLeft]);
+    tap_[kTapRight][tp] = float(v[kRight]);
+    tap_[kTapSub][tp] = float(v[kSub]);
     out_blk_[kOutFL][s] = float(v[kLeft]);
     out_blk_[kOutFR][s] = float(v[kRight]);
     for (int o = kOutFC; o < kNumOut; ++o) out_blk_[o][s] = p.sub_to[o] ? float(v[kSub]) : 0.f;
   }
 
+  tap_pos_.store(tap_pos_.load(std::memory_order_relaxed) + uint32_t(B), std::memory_order_release);
   for (int c = 0; c < kNumChans; ++c) {
     store_max(out_peak_[c], float(pk[c]));
     add_relaxed(out_sq_[c], sq[c]);

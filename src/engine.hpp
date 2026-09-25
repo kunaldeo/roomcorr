@@ -69,6 +69,13 @@ public:
   void collect_garbage();
   EngineStats read_stats();  // resets the peak-hold values
 
+  // Spectrum tap: the most recent kTapSize samples of the input ((L+R)/2,
+  // before any processing) and of each output, for the live analyzer.
+  enum Tap { kTapIn = 0, kTapLeft, kTapRight, kTapSub, kNumTaps };
+  static constexpr int kTapSize = 16384;  // power of two
+  // Non-realtime: copies the newest n (<= kTapSize) samples of a tap.
+  void read_tap(int tap, float* dst, int n) const;
+
   // Realtime. in and out: kNumOut planar channels (FL FR FC LFE RL RR);
   // null input pointers are silence.
   void process(const float* const* in, float* const* out, int n);
@@ -109,6 +116,9 @@ private:
   // Coefficients currently applied, to detect changes.
   double cur_xover_ = -1, cur_bass_ = 1e9, cur_treble_ = 1e9;
   int cur_slope_ = -1;
+
+  std::vector<float> tap_[kNumTaps];
+  std::atomic<uint32_t> tap_pos_{0};
 
   // Stats (audio thread writes, control thread reads)
   std::atomic<float> in_peak_[2]{}, out_peak_[kNumChans]{};

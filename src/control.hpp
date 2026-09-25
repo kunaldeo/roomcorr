@@ -29,10 +29,11 @@ public:
 
   void send(int client, const Json& msg);
   void broadcast_subscribers(const Json& msg);
-  void subscribe(int client, int interval_ms);
+  void subscribe(int client, int interval_ms, bool spectrum = false);
 
-  // Calls make_status for each subscriber whose interval has elapsed.
-  void tick(int64_t now_ms, const std::function<Json()>& make_status);
+  // Calls make_status for each subscriber whose interval has elapsed;
+  // the flag says whether that subscriber asked for spectra.
+  void tick(int64_t now_ms, const std::function<Json(bool spectrum)>& make_status);
 
 private:
   struct Client {
@@ -40,6 +41,7 @@ private:
     spa_source* source = nullptr;
     std::string inbuf;
     int interval_ms = 0;  // 0 = not subscribed
+    bool spectrum = false;
     int64_t last_push = 0;
   };
 

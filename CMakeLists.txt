@@ -42,6 +42,7 @@ add_executable(roomcorr
   src/measure.cpp
   src/calibrate.cpp
   src/devices.cpp
+  src/spectrum.cpp
 )
 target_link_libraries(roomcorr PRIVATE roomcorr_core PkgConfig::PIPEWIRE)
 

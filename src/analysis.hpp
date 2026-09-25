@@ -66,6 +66,9 @@ std::vector<double> log_grid(double f_lo, double f_hi, int per_octave);
 // the peak of the band-passed Hilbert envelope.
 double arrival_time(const std::vector<double>& ir, double f_lo, double f_hi, int fs);
 
+// Hilbert envelope of the IR band-limited to [f_lo, f_hi].
+std::vector<double> envelope(const std::vector<double>& ir, double f_lo, double f_hi, int fs);
+
 // Frequency-dependent windowed power spectrum (like REW's FDW): each
 // frequency sees a right-side window of `cycles` periods, clamped to
 // [min_ms, max_ms]. Long windows in the bass capture room modes (what we

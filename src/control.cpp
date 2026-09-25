@@ -134,21 +134,35 @@ void ControlServer::broadcast_subscribers(const Json& msg) {
   for (int fd : fds) send(fd, msg);
 }
 
-void ControlServer::subscribe(int client, int interval_ms) {
+void ControlServer::subscribe(int client, int interval_ms, bool spectrum) {
   auto it = clients_.find(client);
-  if (it != clients_.end()) it->second.interval_ms = std::max(20, interval_ms);
+  if (it == clients_.end()) return;
+  it->second.interval_ms = std::max(20, interval_ms);
+  it->second.spectrum = spectrum;
 }
 
-void ControlServer::tick(int64_t now_ms, const std::function<Json()>& make_status) {
-  std::vector<int> due;
+void ControlServer::tick(int64_t now_ms, const std::function<Json(bool spectrum)>& make_status) {
+  std::vector<std::pair<int, bool>> due;
   for (auto& [fd, c] : clients_)
     if (c.interval_ms > 0 && now_ms - c.last_push >= c.interval_ms) {
-      due.push_back(fd);
+      due.emplace_back(fd, c.spectrum);
       c.last_push = now_ms;
     }
   if (due.empty()) return;
-  Json status = make_status();
-  for (int fd : due) send(fd, status);
+  // Build each variant at most once per tick.
+  Json plain, full;
+  bool have_plain = false, have_full = false;
+  for (auto& [fd, spec] : due) {
+    if (spec && !have_full) {
+      full = make_status(true);
+      have_full = true;
+    }
+    if (!spec && !have_plain) {
+      plain = make_status(false);
+      have_plain = true;
+    }
+    send(fd, spec ? full : plain);
+  }
 }
 
 void ControlServer::drop(int fd) {

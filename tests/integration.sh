@@ -11,7 +11,7 @@ mkdir -p "$T/cfg/roomcorr"
 echo "{\"output_device\":\"rc_test_out\",\"sub_outputs\":[\"FC\",\"LFE\"]${EXTRA_CONFIG:-}}" > "$T/cfg/roomcorr/config.json"
 MOD=$(pactl load-module module-null-sink sink_name=rc_test_out channels=6 \
   channel_map=front-left,front-right,front-center,lfe,rear-left,rear-right sink_properties=device.description=rc_test_out)
-XDG_CONFIG_HOME=$T/cfg XDG_DATA_HOME=$T/data ROOMCORR_SOCKET=$T/rc.sock "$BIN" daemon >"$T/daemon.log" 2>&1 &
+XDG_CONFIG_HOME=$T/cfg XDG_DATA_HOME=$T/data ROOMCORR_INSTANCE=test ROOMCORR_SOCKET=$T/rc.sock "$BIN" daemon >"$T/daemon.log" 2>&1 &
 DPID=$!
 sleep 1.5
 
@@ -26,7 +26,7 @@ PY
 pw-record --target rc_test_out -P stream.capture.sink=true --channels 6 --format f32 --rate 48000 "$T/rec.wav" &
 RPID=$!
 sleep 0.5
-pw-play --target roomcorr_sink "$T/test.wav"
+pw-play --target roomcorr_sink_test "$T/test.wav"
 sleep 0.3
 kill $RPID; wait $RPID 2>/dev/null || true
 

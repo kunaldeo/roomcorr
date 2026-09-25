@@ -247,24 +247,23 @@ double band_taper(double f, double f_lo, double f_hi) {
   return 1;
 }
 
-double arrival_time(const std::vector<double>& ir, double f_lo, double f_hi, int fs) {
+std::vector<double> envelope(const std::vector<double>& ir, double f_lo, double f_hi, int fs) {
   size_t N = next_pow2(ir.size());
   auto X = rfft(ir, N);
   std::vector<cplx> Z(N, 0.0);
   for (size_t k = 1; k < N / 2; ++k) Z[k] = 2.0 * X[k] * band_taper(double(k) * fs / double(N), f_lo, f_hi);
   auto z = cfft(Z, true);
-  size_t best = 0;
-  double bv = -1;
-  for (size_t i = 0; i < N; ++i) {
-    double v = std::abs(z[i]);
-    if (v > bv) {
-      bv = v;
-      best = i;
-    }
-  }
+  std::vector<double> env(ir.size());
+  for (size_t i = 0; i < env.size(); ++i) env[i] = std::abs(z[i]) / double(N);
+  return env;
+}
+
+double arrival_time(const std::vector<double>& ir, double f_lo, double f_hi, int fs) {
+  auto env = envelope(ir, f_lo, f_hi, fs);
+  size_t best = size_t(std::max_element(env.begin(), env.end()) - env.begin());
   // Parabolic refinement for sub-sample precision.
-  if (best > 0 && best + 1 < N) {
-    double a = std::abs(z[best - 1]), b = std::abs(z[best]), c = std::abs(z[best + 1]);
+  if (best > 0 && best + 1 < env.size()) {
+    double a = env[best - 1], b = env[best], c = env[best + 1];
     double den = a - 2 * b + c;
     if (std::fabs(den) > 1e-30) return double(best) + 0.5 * (a - c) / den;
   }

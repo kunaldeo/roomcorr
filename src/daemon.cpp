@@ -5,6 +5,7 @@
 // loopback/filter-chain modules: the capture side (our sink) triggers the
 // playback side, whose process callback moves one quantum through the DSP.
 #include <algorithm>
+#include <cstdlib>
 #include <cmath>
 #include <csignal>
 #include <cstdio>
@@ -18,6 +19,7 @@
 #include "config.hpp"
 #include "control.hpp"
 #include "engine.hpp"
+#include "spectrum.hpp"
 #include "wav.hpp"
 
 namespace rc {
@@ -25,8 +27,16 @@ namespace rc {
 namespace {
 
 constexpr uint32_t kMaxFrames = 8192;
-constexpr const char* kSinkName = "roomcorr_sink";
-constexpr const char* kOutputName = "roomcorr_output";
+// ROOMCORR_INSTANCE gives test daemons their own node names so they never
+// collide with (or play through) the real one.
+std::string instance_suffix() {
+  const char* s = getenv("ROOMCORR_INSTANCE");
+  return s && *s ? std::string("_") + s : std::string();
+}
+const std::string kSinkNameStr = "roomcorr_sink" + instance_suffix();
+const std::string kOutputNameStr = "roomcorr_output" + instance_suffix();
+const char* const kSinkName = kSinkNameStr.c_str();
+const char* const kOutputName = kOutputNameStr.c_str();
 
 int64_t now_ms() {
   timespec ts;
@@ -55,7 +65,7 @@ private:
   void load_filters();
   Json handle(int client, const Json& req);
   Json state_json();
-  Json status_json();
+  Json status_json(bool spectrum);
 
   pw_main_loop* main_loop_ = nullptr;
   pw_context* context_ = nullptr;
@@ -67,11 +77,14 @@ private:
   spa_source* timer_ = nullptr;
 
   Engine engine_;
+  SpectrumAnalyzer analyzer_;
   Config cfg_;
   ControlServer control_;
   std::string capture_state_ = "unconnected", playback_state_ = "unconnected";
   std::string filter_status_ = "none";
   int64_t save_due_ = 0;
+  int64_t quiet_until_ = 0;  // measurement mute lease (not saved)
+  void push_params();
   int exit_code_ = 0;
 
   float tmp_in_[kNumOut][kMaxFrames] = {};
@@ -243,8 +256,14 @@ void Daemon::load_filters() {
   fprintf(stderr, "roomcorr: filters %s\n", filter_status_.c_str());
 }
 
+void Daemon::push_params() {
+  EngineParams p = EngineParams::from_config(cfg_);
+  if (quiet_until_ > now_ms()) p.mute = true;
+  engine_.set_params(p);
+}
+
 void Daemon::apply_config(const Config& old, bool force_filters) {
-  engine_.set_params(EngineParams::from_config(cfg_));
+  push_params();
   bool filters_changed = force_filters;
   for (int c = 0; c < kNumChans; ++c) filters_changed = filters_changed || old.ch[c].filter != cfg_.ch[c].filter;
   if (filters_changed) load_filters();
@@ -265,12 +284,14 @@ Json Daemon::state_json() {
   j["config"] = cfg_.to_json();
   j["preamp_db"] = cfg_.auto_preamp_db();
   j["filters"] = filter_status_;
+  j["quiet"] = quiet_until_ > now_ms();
   j["latency_ms"] = 1000.0 * Engine::kBlock / kSampleRate;
   j["sink"] = kSinkName;
+  j["spectrum_freqs"] = Json(analyzer_.freqs());
   return j;
 }
 
-Json Daemon::status_json() {
+Json Daemon::status_json(bool spectrum) {
   EngineStats s = engine_.read_stats();
   auto meter = [](const Meter& m) {
     Json j = Json::object();
@@ -287,6 +308,14 @@ Json Daemon::status_json() {
   j["load"] = std::round(s.load * 1000) / 1000;
   j["sink_state"] = capture_state_;
   j["output_state"] = playback_state_;
+  if (spectrum) {
+    Json sp = Json::object();
+    sp["in"] = Json(analyzer_.analyze(engine_, Engine::kTapIn));
+    sp["left"] = Json(analyzer_.analyze(engine_, Engine::kTapLeft));
+    sp["right"] = Json(analyzer_.analyze(engine_, Engine::kTapRight));
+    sp["sub"] = Json(analyzer_.analyze(engine_, Engine::kTapSub));
+    j["spectrum"] = sp;
+  }
   return j;
 }
 
@@ -296,9 +325,9 @@ Json Daemon::handle(int client, const Json& req) {
   ok["type"] = "ok";
   if (cmd == "ping") return ok;
   if (cmd == "get") return state_json();
-  if (cmd == "status") return status_json();
+  if (cmd == "status") return status_json(req.get("spectrum").as_bool(false));
   if (cmd == "subscribe") {
-    control_.subscribe(client, req.get("interval_ms").as_int(100));
+    control_.subscribe(client, req.get("interval_ms").as_int(100), req.get("spectrum").as_bool(false));
     return state_json();
   }
   if (cmd == "set") {
@@ -318,6 +347,16 @@ Json Daemon::handle(int client, const Json& req) {
     }
     return state_json();
   }
+  if (cmd == "quiet") {
+    // Temporary mute for measurements. It expires on its own, so a
+    // calibration that crashes can't leave the speakers silent.
+    int seconds = std::clamp(req.get("seconds").as_int(0), 0, 600);
+    quiet_until_ = seconds ? now_ms() + seconds * 1000 : 0;
+    push_params();
+    Json r = state_json();
+    r["quiet"] = seconds > 0;
+    return r;
+  }
   if (cmd == "reload") {
     Config old = cfg_;
     cfg_ = load_config();
@@ -336,8 +375,12 @@ Json Daemon::handle(int client, const Json& req) {
 void Daemon::on_timer(void* data, uint64_t) {
   auto* self = static_cast<Daemon*>(data);
   int64_t now = now_ms();
-  self->control_.tick(now, [self] { return self->status_json(); });
+  self->control_.tick(now, [self](bool spectrum) { return self->status_json(spectrum); });
   self->engine_.collect_garbage();
+  if (self->quiet_until_ && now >= self->quiet_until_) {
+    self->quiet_until_ = 0;
+    self->push_params();
+  }
   if (self->save_due_ && now >= self->save_due_) {
     self->save_due_ = 0;
     try {

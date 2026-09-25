@@ -377,6 +377,69 @@ DesignResult design_filters(const Config& in, const MeasurementSet& m, const Mic
   sys["after"] = round_vec(sys_after, off);
   rep["system"] = sys;
 
+  // Timing: energy-time curves at the main position (what each speaker's
+  // sound looks like arriving at the seat), for the Studio.
+  {
+    const double first = std::min({arrival[0][kLeft], arrival[0][kRight], arrival[0][kSub]});
+    const long start = long(first) - long(0.010 * fs);
+    const int step = fs / 4000;  // 0.25 ms
+    const int bins = int(0.150 * fs) / step;
+    Json tj = Json::object();
+    tj["start_ms"] = -10;
+    tj["step_ms"] = 0.25;
+    Json arr = Json::object(), del = Json::object();
+    for (int c = 0; c < kNumChans; ++c) {
+      auto env = c == kSub ? envelope(m.irs[0][size_t(c)], 20, 200, fs) : envelope(m.irs[0][size_t(c)], 100, 16000, fs);
+      double pk = *std::max_element(env.begin(), env.end());
+      std::vector<double> etc;
+      for (int b = 0; b < bins; ++b) {
+        double mx = 0;
+        for (int i = 0; i < step; ++i) {
+          long k = start + long(b * step + i);
+          if (k >= 0 && k < long(env.size())) mx = std::max(mx, env[size_t(k)]);
+        }
+        etc.push_back(std::max(-60.0, 20 * std::log10(mx / pk + 1e-12)));
+      }
+      tj[kChanNames[c]] = round_vec(etc);
+      arr[kChanNames[c]] = (arrival[0][size_t(c)] - first) * 1000.0 / fs;
+      del[kChanNames[c]] = delay_ms[c];
+    }
+    tj["arrival_ms"] = arr;
+    tj["delay_ms"] = del;
+    rep["timing"] = tj;
+  }
+
+  // Alignment: mains vs sub through the crossover at the main position,
+  // magnitudes and phase difference, before (no delay, normal polarity)
+  // and after alignment.
+  {
+    Json aj = Json::object();
+    std::vector<double> fr, mdb, sdb, sum_before, sum_after, ph_before, ph_after;
+    for (size_t k = 0; k < F.size(); ++k) {
+      if (F[k] < xo / 4 || F[k] > xo * 4) continue;
+      cplx mm = Mn[k], ss = Sb[k];
+      cplx sa = ss * best_pol * std::polar(1.0, -2 * M_PI * F[k] * best_d / 1000);
+      auto dbv = [&](cplx v) { return 20 * std::log10(std::abs(v) + 1e-30) - 6.02 - cal.at(F[k]) + off; };
+      auto phase = [](cplx a, cplx b) { return std::arg(b / a) * 180 / M_PI; };
+      fr.push_back(F[k]);
+      mdb.push_back(dbv(mm));
+      sdb.push_back(dbv(ss));
+      sum_before.push_back(dbv(mm + ss));
+      sum_after.push_back(dbv(mm + sa));
+      ph_before.push_back(phase(mm, ss));
+      ph_after.push_back(phase(mm, sa));
+    }
+    aj["freqs"] = round_vec(fr);
+    aj["mains_db"] = round_vec(mdb);
+    aj["sub_db"] = round_vec(sdb);
+    aj["sum_before_db"] = round_vec(sum_before);
+    aj["sum_after_db"] = round_vec(sum_after);
+    aj["phase_before_deg"] = round_vec(ph_before);
+    aj["phase_after_deg"] = round_vec(ph_after);
+    aj["crossover_hz"] = xo;
+    rep["alignment"] = aj;
+  }
+
   Json sum = Json::object();
   sum["trim_db"] = Json(std::vector<double>{trim[0], trim[1], trim[2]});
   sum["delay_ms"] = Json(std::vector<double>{delay_ms[0], delay_ms[1], delay_ms[2]});

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <csignal>
+#include <cstdarg>
 #include <cstdio>
 #include <ctime>
 #include <filesystem>
@@ -25,7 +26,7 @@ namespace rc {
 
 namespace fs = std::filesystem;
 
-int run_verify(int argc, char** argv);
+static int verify_impl();
 
 namespace {
 
@@ -39,21 +40,99 @@ std::string yellow(const std::string& s) { return kColor ? "\033[33m" + s + "\03
 std::string red(const std::string& s) { return kColor ? "\033[31m" + s + "\033[0m" : s; }
 std::string cyan(const std::string& s) { return kColor ? "\033[36m" + s + "\033[0m" : s; }
 
+// --json: machine-readable mode for the Studio. Every line of output
+// becomes {"ev":"log"}, prompts become {"ev":"prompt"} answered on stdin,
+// and key moments get their own structured events.
+bool g_json = false;
+
+void emit(const Json& ev) {
+  fputs((ev.dump() + "\n").c_str(), stdout);
+  fflush(stdout);
+}
+
+Json event(const char* type) {
+  Json e = Json::object();
+  e["ev"] = type;
+  return e;
+}
+
+std::string strip_ansi(const std::string& in) {
+  std::string o;
+  for (size_t i = 0; i < in.size(); ++i) {
+    if (in[i] == '\033') {
+      while (i < in.size() && in[i] != 'm') ++i;
+      continue;
+    }
+    if (in[i] != '\r') o += in[i];
+  }
+  return o;
+}
+
+void out(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void out(const char* fmt, ...) {
+  char buf[8192];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  if (!g_json) {
+    fputs(buf, stdout);
+    fflush(stdout);
+    return;
+  }
+  std::string text = strip_ansi(buf);
+  size_t a = 0;
+  while (a <= text.size()) {
+    size_t b = text.find('\n', a);
+    if (b == std::string::npos) b = text.size();
+    std::string line = text.substr(a, b - a);
+    size_t f = line.find_first_not_of(" ");
+    if (f != std::string::npos) {
+      Json e = event("log");
+      e["text"] = line.substr(f);
+      emit(e);
+    }
+    a = b + 1;
+  }
+}
+
+std::string read_answer() {
+  std::string line;
+  if (!std::getline(std::cin, line)) throw std::runtime_error("aborted");
+  return line;
+}
+
 std::string f1(const char* fmt, double v) {
   char buf[64];
   snprintf(buf, sizeof buf, fmt, v);
   return buf;
 }
 
-void step(int n, const std::string& title) { printf("\n%s %s\n", cyan(bold("[" + std::to_string(n) + "]")).c_str(), bold(title).c_str()); }
+void step(int n, const std::string& title) {
+  if (g_json) {
+    Json e = event("step");
+    e["n"] = n;
+    e["title"] = title;
+    emit(e);
+    return;
+  }
+  out("\n%s %s\n", cyan(bold("[" + std::to_string(n) + "]")).c_str(), bold(title).c_str());
+}
 
 // --yes: answer every prompt automatically (for unattended runs).
 bool g_auto = false;
 
-std::string ask(const std::string& prompt) {
-  printf("%s ", prompt.c_str());
+std::string ask(const std::string& prompt, const char* kind = "text") {
+  if (g_json && !g_auto) {
+    Json e = event("prompt");
+    e["kind"] = kind;
+    e["text"] = strip_ansi(prompt);
+    emit(e);
+    return read_answer();
+  }
+  out("%s ", prompt.c_str());
   if (g_auto) {
-    printf("%s\n", dim("(auto)").c_str());
+    out("%s\n", dim("(auto)").c_str());
     return "";
   }
   fflush(stdout);
@@ -62,14 +141,29 @@ std::string ask(const std::string& prompt) {
   return line;
 }
 
-void press_enter(const std::string& what = "Press Enter to continue") { ask(dim("› " + what + "...")); }
+void press_enter(const std::string& what = "Press Enter to continue") {
+  if (g_json) {
+    ask(what, "continue");
+    return;
+  }
+  ask(dim("› " + what + "..."));
+}
 
 // auto_answer: what --yes picks (retry prompts say no, so they can't loop).
 bool yes(const std::string& prompt, bool def = true, int auto_answer = -1) {
   if (g_auto) {
     bool a = auto_answer < 0 ? def : auto_answer == 1;
-    printf("%s %s\n", prompt.c_str(), dim(a ? "(auto: yes)" : "(auto: no)").c_str());
+    out("%s %s\n", prompt.c_str(), dim(a ? "(auto: yes)" : "(auto: no)").c_str());
     return a;
+  }
+  if (g_json) {
+    Json e = event("prompt");
+    e["kind"] = "yesno";
+    e["text"] = strip_ansi(prompt);
+    e["default"] = def;
+    emit(e);
+    std::string a = read_answer();
+    return a.empty() ? def : (a[0] == 'y' || a[0] == 'Y');
   }
   std::string a = ask(prompt + (def ? " [Y/n]" : " [y/N]"));
   if (a.empty()) return def;
@@ -84,15 +178,22 @@ bool g_daemon_muted = false;
 std::string g_restore_sink;
 double g_restore_volume = -1;
 
+// Mutes the Room Correction output for `seconds` (a lease the daemon
+// expires by itself); 0 releases it.
+bool daemon_quiet(int seconds) {
+  try {
+    Json r = Json::object();
+    r["cmd"] = "quiet";
+    r["seconds"] = seconds;
+    return control_request(r).get("type").as_str() == "state";
+  } catch (...) {
+    return false;
+  }
+}
+
 void restore() {
   if (g_daemon_muted) {
-    try {
-      Json r = Json::object();
-      r["cmd"] = "set";
-      r["values"]["mute"] = false;
-      control_request(r);
-    } catch (...) {
-    }
+    daemon_quiet(0);
     g_daemon_muted = false;
   }
   if (!g_restore_sink.empty() && g_restore_volume >= 0) {
@@ -103,7 +204,7 @@ void restore() {
 
 void on_interrupt(int) {
   restore();
-  printf("\n%s\n", yellow("Interrupted; audio restored.").c_str());
+  out("\n%s\n", yellow("Interrupted; audio restored.").c_str());
   _exit(130);
 }
 
@@ -181,16 +282,24 @@ double silence_level(const std::string& target, const std::string& mic, double f
 // Raises the test level until the mic reads target_spl (or max_level).
 double auto_level(const std::string& target, const std::string& mic, const MicCal& cal,
                   const std::vector<std::string>& outs, double f_lo, double f_hi, double target_spl, double floor_dbfs,
-                  double* spl_out) {
+                  double* spl_out, const char* label) {
   double level = -45, max_level = -10;
   double spl = 0;
   for (int i = 0; i < 8; ++i) {
     Burst b = noise_burst(target, mic, outs, level, f_lo, f_hi);
     spl = cal.spl(b.mic_dbfs);
-    printf("    test signal %s dBFS  →  %s dB SPL  %s\n", f1("%6.1f", level).c_str(), f1("%5.1f", spl).c_str(),
+    if (g_json) {
+      Json e = event("level");
+      e["what"] = label;
+      e["dbfs"] = level;
+      e["spl"] = spl;
+      e["snr"] = b.mic_dbfs - floor_dbfs;
+      emit(e);
+    }
+    out("    test signal %s dBFS  →  %s dB SPL  %s\n", f1("%6.1f", level).c_str(), f1("%5.1f", spl).c_str(),
            dim("(" + f1("%.0f", b.mic_dbfs - floor_dbfs) + " dB above room noise)").c_str());
     if (b.capture_peak > -2) {
-      printf("    %s\n", yellow("microphone is close to clipping; backing off").c_str());
+      out("    %s\n", yellow("microphone is close to clipping; backing off").c_str());
       level -= 6;
       break;
     }
@@ -286,15 +395,23 @@ MicCal load_cal_or_die(Config& cfg) {
 }
 
 void print_design(const DesignResult& r) {
-  for (const auto& n : r.notes) printf("    %s\n", n.c_str());
-  for (const auto& w : r.warnings) printf("    %s %s\n", yellow("!").c_str(), w.c_str());
+  if (g_json) {
+    Json e = event("design");
+    e["notes"] = Json(r.notes);
+    e["warnings"] = Json(r.warnings);
+    e["summary"] = r.report.get("summary");
+    emit(e);
+    return;
+  }
+  for (const auto& n : r.notes) out("    %s\n", n.c_str());
+  for (const auto& w : r.warnings) out("    %s %s\n", yellow("!").c_str(), w.c_str());
 }
 
 }  // namespace
 
 // ------------------------------------------------------------------ calibrate
 
-int run_calibrate(int argc, char** argv) {
+static int calibrate_impl(int argc, char** argv) {
   Config cfg = load_config();
   int positions = cfg.positions;
   for (int i = 0; i < argc; ++i) {
@@ -302,130 +419,165 @@ int run_calibrate(int argc, char** argv) {
     if (a == "--positions" && i + 1 < argc) positions = std::clamp(atoi(argv[++i]), 1, 9);
     else if (a == "--mic-cal" && i + 1 < argc) cfg.mic_cal = argv[++i];
     else if (a == "--yes" || a == "-y") g_auto = true;
+    else if (a == "--json") g_json = true;
   }
 
   setvbuf(stdout, nullptr, _IOLBF, 0);
-  printf("%s\n", bold("Room Correction — calibration").c_str());
-  printf("%s\n", dim("Measures your speakers and sub with the UMIK-1, then builds correction filters.").c_str());
+  out("%s\n", bold("Room Correction — calibration").c_str());
+  out("%s\n", dim("Measures your speakers and sub with the UMIK-1, then builds correction filters.").c_str());
 
   step(1, "Devices");
   if (cfg.output_device.empty() || !sink_exists(cfg.output_device)) {
-    printf("  %s\n", red("The X4 5.1 output isn't configured. Run `roomcorr setup` first.").c_str());
+    out("  %s\n", red("The X4 5.1 output isn't configured. Run `roomcorr setup` first.").c_str());
     return 1;
   }
   auto mic = find_mic(cfg);
   if (!mic) {
-    printf("  %s\n", red("No UMIK-1 found. Plug it in and try again.").c_str());
+    out("  %s\n", red("No UMIK-1 found. Plug it in and try again.").c_str());
     return 1;
   }
   MicCal cal = load_cal_or_die(cfg);
-  printf("  Output      %s\n", cfg.output_device.c_str());
-  printf("  Microphone  %s\n", mic->c_str());
-  printf("  Mic cal     %s  (serial %s, sensitivity %+.3f dB, %zu points)\n", fs::path(cal.path).filename().c_str(),
+  out("  Output      %s\n", cfg.output_device.c_str());
+  out("  Microphone  %s\n", mic->c_str());
+  out("  Mic cal     %s  (serial %s, sensitivity %+.3f dB, %zu points)\n", fs::path(cal.path).filename().c_str(),
          cal.serial.c_str(), cal.sens_db, cal.f.size());
   run_cmd("pactl set-source-volume " + shell_quote(*mic) + " 100% >/dev/null 2>&1");
   run_cmd("pactl set-source-mute " + shell_quote(*mic) + " 0 >/dev/null 2>&1");
 
   signal(SIGINT, on_interrupt);
   signal(SIGTERM, on_interrupt);
-  Json mute = Json::object();
-  mute["mute"] = true;
-  if (daemon_set(mute)) {
+  signal(SIGHUP, on_interrupt);
+  signal(SIGPIPE, on_interrupt);
+  if (daemon_quiet(120)) {
     g_daemon_muted = true;
-    printf("  %s\n", dim("Room Correction output muted while measuring.").c_str());
+    out("  %s\n", dim("Room Correction output muted while measuring.").c_str());
   }
 
   step(2, "Before we start");
-  printf("  • Set the %s volume to where you normally listen (fairly loud).\n", bold("Marantz").c_str());
-  printf("    %s the calibration assumes it stays there. Use the Room Correction volume from now on.\n",
+  out("  • Set the %s volume to where you normally listen (fairly loud).\n", bold("Marantz").c_str());
+  out("    %s the calibration assumes it stays there. Use the Room Correction volume from now on.\n",
          yellow("Don't touch it afterwards:").c_str());
-  printf("  • On the %s: volume knob about halfway, crossover/low-pass knob to its %s (or LFE), phase 0°.\n",
+  out("  • On the %s: volume knob about halfway, crossover/low-pass knob to its %s (or LFE), phase 0°.\n",
          bold("Polk sub").c_str(), bold("maximum").c_str());
-  printf("  • Stop other audio. Keep the room quiet during the sweeps.\n");
-  printf("  • Put the mic at the %s, ear height, pointing %s at the ceiling (90° calibration).\n",
+  out("  • Stop other audio. Keep the room quiet during the sweeps.\n");
+  out("  • Put the mic at the %s, ear height, pointing %s at the ceiling (90° calibration).\n",
          bold("main listening position").c_str(), bold("straight up").c_str());
   press_enter();
 
-  const std::string& out = cfg.output_device;
+  const std::string& dev = cfg.output_device;
+  if (g_daemon_muted) daemon_quiet(120);
   step(3, "Room noise");
-  double floor_main = silence_level(out, *mic, 200, 4000), floor_sub = silence_level(out, *mic, 30, 90);
-  printf("  Noise floor ≈ %.0f dB SPL (mid band), %.0f dB SPL (sub band)\n", cal.spl(floor_main), cal.spl(floor_sub));
+  double floor_main = silence_level(dev, *mic, 200, 4000), floor_sub = silence_level(dev, *mic, 30, 90);
+  out("  Noise floor ≈ %.0f dB SPL (mid band), %.0f dB SPL (sub band)\n", cal.spl(floor_main), cal.spl(floor_sub));
+  if (g_json) {
+    Json e = event("noise");
+    e["mid_spl"] = cal.spl(floor_main);
+    e["sub_spl"] = cal.spl(floor_sub);
+    emit(e);
+  }
 
   step(4, "Find the subwoofer");
   std::vector<std::string> sub_outs;
   // Subs with auto-standby (the Polk has one) need a few seconds of bass
   // before they switch on; short test bursts alone go unheard.
-  printf("    %s\n", dim("waking the sub from standby...").c_str());
-  noise_burst(out, *mic, {"FC", "LFE"}, -30, 30, 90, 4.0);
+  out("    %s\n", dim("waking the sub from standby...").c_str());
+  noise_burst(dev, *mic, {"FC", "LFE"}, -30, 30, 90, 4.0);
   for (double level : {-35.0, -25.0}) {
     for (const char* p : {"FC", "LFE"}) {
-      Burst b = noise_burst(out, *mic, {p}, level, 30, 90);
+      Burst b = noise_burst(dev, *mic, {p}, level, 30, 90);
       bool hit = b.mic_dbfs - floor_sub > 10;
-      printf("    C/Sub jack, %s wire (%s): %s\n", std::string(p) == "FC" ? "tip" : "ring", p,
+      if (g_json) {
+        Json e = event("sub_detect");
+        e["output"] = p;
+        e["snr"] = b.mic_dbfs - floor_sub;
+        e["heard"] = hit;
+        emit(e);
+      }
+      out("    C/Sub jack, %s wire (%s): %s\n", std::string(p) == "FC" ? "tip" : "ring", p,
              hit ? green("sub heard (" + f1("%+.0f", b.mic_dbfs - floor_sub) + " dB)").c_str()
                  : dim("nothing (" + f1("%+.0f", b.mic_dbfs - floor_sub) + " dB)").c_str());
       if (hit) sub_outs.push_back(p);
     }
     if (!sub_outs.empty()) break;
-    printf("    %s\n", dim("trying louder...").c_str());
+    out("    %s\n", dim("trying louder...").c_str());
   }
   if (sub_outs.empty()) {
-    printf("  %s\n", red("The sub wasn't detected. Check it's powered on, its volume is up and the cable is in the C/Sub jack.").c_str());
+    out("  %s\n", red("The sub wasn't detected. Check it's powered on, its volume is up and the cable is in the C/Sub jack.").c_str());
     restore();
     return 1;
   }
   cfg.sub_outputs = sub_outs;
 
+  if (g_daemon_muted) daemon_quiet(120);
   step(5, "Levels");
-  printf("  Mains (left):\n");
+  out("  Mains (left):\n");
   double main_spl = 0, sub_spl = 0;
-  double main_level = auto_level(out, *mic, cal, {"FL"}, 200, 4000, 75, floor_main, &main_spl);
-  printf("  Subwoofer:\n");
-  double sub_level = auto_level(out, *mic, cal, sub_outs, 30, 90, 75, floor_sub, &sub_spl);
+  double main_level = auto_level(dev, *mic, cal, {"FL"}, 200, 4000, 75, floor_main, &main_spl, "mains");
+  out("  Subwoofer:\n");
+  double sub_level = auto_level(dev, *mic, cal, sub_outs, 30, 90, 75, floor_sub, &sub_spl, "sub");
   // Sensitivity difference: how much louder the sub plays than a main
   // speaker for the same signal.
   while (true) {
     double diff = (sub_spl - sub_level) - (main_spl - main_level);
-    printf("  Sub vs main speaker at the same signal level: %s dB\n", f1("%+.1f", diff).c_str());
+    if (g_json) {
+      Json e = event("sub_balance");
+      e["diff_db"] = diff;
+      e["ok"] = diff >= -3 && diff <= 9;
+      emit(e);
+    }
+    out("  Sub vs main speaker at the same signal level: %s dB\n", f1("%+.1f", diff).c_str());
     if (diff >= -3 && diff <= 9) {
-      printf("  %s\n", green("Sub volume knob is in a good range.").c_str());
+      out("  %s\n", green("Sub volume knob is in a good range.").c_str());
       break;
     }
-    printf("  %s\n", yellow(diff < -3 ? "The sub is quiet: turn its volume knob UP a little."
+    out("  %s\n", yellow(diff < -3 ? "The sub is quiet: turn its volume knob UP a little."
                                       : "The sub is very loud: turn its volume knob DOWN a little.")
                          .c_str());
     if (g_auto) break;
     std::string a = ask(dim("› Adjust the knob, then Enter to re-check (or 's' to skip):"));
     if (!a.empty() && (a[0] == 's' || a[0] == 'S')) break;
-    Burst b = noise_burst(out, *mic, sub_outs, sub_level, 30, 90);
+    Burst b = noise_burst(dev, *mic, sub_outs, sub_level, 30, 90);
     sub_spl = cal.spl(b.mic_dbfs);
   }
   const double main_amp = std::min(0.5, std::pow(10.0, main_level / 20));
   const double sub_amp = std::min(0.5, std::pow(10.0, sub_level / 20));
 
   step(6, "Measure");
-  printf("  %d positions, about 25 s each. Sweeps play left, right, then sub.\n", positions);
-  printf("  %s\n", dim("More positions = a correction that works for more than one head position.").c_str());
+  out("  %d positions, about 25 s each. Sweeps play left, right, then sub.\n", positions);
+  out("  %s\n", dim("More positions = a correction that works for more than one head position.").c_str());
   MeasurementSet set;
   set.dir = data_dir() + "/measurements/" + timestamp();
   Sequence seq = build_sequence(main_amp, sub_amp, sub_outs);
   for (int p = 0; p < positions;) {
-    printf("\n  %s %s\n", bold("Position " + std::to_string(p + 1) + "/" + std::to_string(positions) + ":").c_str(),
+    out("\n  %s %s\n", bold("Position " + std::to_string(p + 1) + "/" + std::to_string(positions) + ":").c_str(),
            kPositionHints[p]);
+    if (g_json) {
+      Json e = event("position");
+      e["n"] = p + 1;
+      e["of"] = positions;
+      e["hint"] = kPositionHints[p];
+      emit(e);
+    }
     press_enter("Place the mic (pointing up), then press Enter; stay quiet");
+    if (g_daemon_muted) daemon_quiet(120);
+    if (g_json) {
+      Json e = event("measuring");
+      e["seconds"] = double(seq.signal[0].size()) / kSampleRate + 1.5;
+      emit(e);
+    }
     MeasureRequest req;
-    req.play_target = out;
+    req.play_target = dev;
     req.positions = kX4Positions;
     req.signal = seq.signal;
     req.capture_target = *mic;
     req.tail_seconds = 0.5;
-    printf("    measuring...");
+    out("    measuring...");
     fflush(stdout);
     MeasureResult res;
     try {
       res = run_measurement(req);
     } catch (const std::exception& e) {
-      printf("\r    %s\n", red(e.what()).c_str());
+      out("\r    %s\n", red(e.what()).c_str());
       if (yes("    Retry?", true, 0)) continue;
       restore();
       return 1;
@@ -442,10 +594,17 @@ int run_calibrate(int argc, char** argv) {
       bad = bad || snr < 25;
       line += std::string(kChanNames[c]) + " " + (ok ? green(f1("%.0f dB", snr)) : yellow(f1("%.0f dB", snr))) + "   ";
     }
-    printf("\r    SNR  %s\n", line.c_str());
-    if (res.capture_peak_dbfs > -1) printf("    %s\n", yellow("The microphone clipped.").c_str());
+    out("\r    SNR  %s\n", line.c_str());
+    if (g_json) {
+      Json e = event("snr");
+      for (int c = 0; c < kNumChans; ++c) e[kChanNames[c]] = ir_snr_db(irs[size_t(c)]);
+      e["clipped"] = res.capture_peak_dbfs > -1;
+      e["position"] = p + 1;
+      emit(e);
+    }
+    if (res.capture_peak_dbfs > -1) out("    %s\n", yellow("The microphone clipped.").c_str());
     if (bad) {
-      printf("    %s\n", yellow("This measurement looks unreliable (noise or clipping).").c_str());
+      out("    %s\n", yellow("This measurement looks unreliable (noise or clipping).").c_str());
       if (yes("    Measure this position again?", true, 0)) continue;
     }
     set.irs.push_back(std::move(irs));
@@ -456,14 +615,14 @@ int run_calibrate(int argc, char** argv) {
   set.meta["created"] = timestamp();
   set.meta["mic_cal"] = cfg.mic_cal;
   set.meta["mic"] = *mic;
-  set.meta["output"] = out;
+  set.meta["output"] = dev;
   set.meta["sub_outputs"] = Json(sub_outs);
   set.meta["main_level_dbfs"] = main_level;
   set.meta["sub_level_dbfs"] = sub_level;
   set.meta["main_sweep_amp"] = main_amp;
   set.meta["noise_floor_spl"] = cal.spl(floor_main);
   save_measurements(set);
-  printf("\n  Saved measurements to %s\n", dim(set.dir).c_str());
+  out("\n  Saved measurements to %s\n", dim(set.dir).c_str());
 
   step(7, "Design filters");
   cfg.positions = positions;
@@ -472,16 +631,16 @@ int run_calibrate(int argc, char** argv) {
   print_design(r);
   save_config(r.cfg);
   if (daemon_reload())
-    printf("  %s\n", green("Filters loaded into the running engine.").c_str());
+    out("  %s\n", green("Filters loaded into the running engine.").c_str());
   else
-    printf("  %s\n", yellow("The roomcorr daemon isn't running; start it with `systemctl --user start roomcorr`.").c_str());
+    out("  %s\n", yellow("The roomcorr daemon isn't running; start it with `systemctl --user start roomcorr`.").c_str());
   restore();
 
-  printf("\n  Verification plays sweeps through the corrected system to confirm the result.\n");
+  out("\n  Verification plays sweeps through the corrected system to confirm the result.\n");
   if (yes("  Run verification now (mic at the main position)?")) {
-    run_verify(0, nullptr);
+    verify_impl();
   }
-  printf("\n%s\n", green(bold("Done. Enjoy the music.")).c_str());
+  out("\n%s\n", green(bold("Done. Enjoy the music.")).c_str());
   return 0;
 }
 
@@ -519,9 +678,43 @@ int run_probe(int argc, char** argv) {
   MicCal cal = load_mic_cal(cfg.mic_cal);
   double floor = silence_level(cfg.output_device, *mic, lo, hi);
   Burst b = noise_burst(cfg.output_device, *mic, outs, level, lo, hi);
-  printf("%s at %.0f dBFS, %.0f-%.0f Hz: mic %.1f dBFS (≈%.0f dB SPL), %+.1f dB over silence, capture peak %.1f dBFS\n",
+  out("%s at %.0f dBFS, %.0f-%.0f Hz: mic %.1f dBFS (≈%.0f dB SPL), %+.1f dB over silence, capture peak %.1f dBFS\n",
          list.c_str(), level, lo, hi, b.mic_dbfs, cal.spl(b.mic_dbfs), b.mic_dbfs - floor, b.capture_peak);
   return 0;
+}
+
+// Entry points: in --json mode always finish with {"ev":"done"} so the
+// Studio knows the run ended, however it ended.
+static int finish(int rc, const char* error = nullptr) {
+  if (g_json) {
+    Json e = event("done");
+    e["ok"] = rc == 0;
+    if (error) e["error"] = error;
+    emit(e);
+  }
+  return rc;
+}
+
+int run_calibrate(int argc, char** argv) {
+  try {
+    return finish(calibrate_impl(argc, argv));
+  } catch (const std::exception& e) {
+    restore();
+    out("%s\n", e.what());
+    return finish(1, e.what());
+  }
+}
+
+int run_verify(int argc, char** argv) {
+  for (int i = 0; i < argc; ++i)
+    if (std::string(argv[i]) == "--json") g_json = true;
+  try {
+    return finish(verify_impl());
+  } catch (const std::exception& e) {
+    restore();
+    out("%s\n", e.what());
+    return finish(1, e.what());
+  }
 }
 
 // ------------------------------------------------------------------ design
@@ -547,11 +740,11 @@ int run_design(int argc, char** argv) {
 
 // ------------------------------------------------------------------ verify
 
-int run_verify(int, char**) {
+static int verify_impl() {
   Config cfg = load_config();
   auto mic = find_mic(cfg);
   if (!mic) {
-    printf("%s\n", red("No UMIK-1 found.").c_str());
+    out("%s\n", red("No UMIK-1 found.").c_str());
     return 1;
   }
   Json state;
@@ -560,7 +753,7 @@ int run_verify(int, char**) {
     r["cmd"] = "get";
     state = control_request(r);
   } catch (const std::exception& e) {
-    printf("%s\n", red(std::string("verify needs the running daemon: ") + e.what()).c_str());
+    out("%s\n", red(std::string("verify needs the running daemon: ") + e.what()).c_str());
     return 1;
   }
   const std::string sink = state.get("sink").as_str("roomcorr_sink");
@@ -571,8 +764,10 @@ int run_verify(int, char**) {
   } catch (...) {
   }
 
-  printf("%s\n", bold("Verifying the corrected system").c_str());
+  out("%s\n", bold("Verifying the corrected system").c_str());
   signal(SIGINT, on_interrupt);
+  signal(SIGHUP, on_interrupt);
+  signal(SIGPIPE, on_interrupt);
   Json v = Json::object();
   v["mute"] = false;
   v["enabled"] = true;
@@ -600,13 +795,13 @@ int run_verify(int, char**) {
   req.signal = sig;
   req.capture_target = *mic;
   req.tail_seconds = 0.5;
-  printf("  measuring (~26 s)...\n");
+  out("  measuring (~26 s)...\n");
   MeasureResult res;
   try {
     res = run_measurement(req);
   } catch (const std::exception& e) {
     restore();
-    printf("%s\n", red(e.what()).c_str());
+    out("%s\n", red(e.what()).c_str());
     return 1;
   }
   restore();
@@ -671,15 +866,25 @@ int run_verify(int, char**) {
         }
       return n ? std::sqrt(sq / n) : 0;
     };
-    printf("  Deviation from target (RMS):\n");
-    printf("    both speakers + sub   20-200 Hz %s dB   200 Hz-10 kHz %s dB\n", f1("%.1f", dev(2, 20, 200)).c_str(),
+    if (g_json) {
+      Json e = event("verify");
+      e["both_bass"] = dev(2, 20, 200);
+      e["both_mid"] = dev(2, 200, 10000);
+      e["left_bass"] = dev(0, 20, 200);
+      e["left_mid"] = dev(0, 200, 10000);
+      e["right_bass"] = dev(1, 20, 200);
+      e["right_mid"] = dev(1, 200, 10000);
+      emit(e);
+    }
+    out("  Deviation from target (RMS):\n");
+    out("    both speakers + sub   20-200 Hz %s dB   200 Hz-10 kHz %s dB\n", f1("%.1f", dev(2, 20, 200)).c_str(),
            f1("%.1f", dev(2, 200, 10000)).c_str());
-    printf("    left                  20-200 Hz %s dB   200 Hz-10 kHz %s dB\n", f1("%.1f", dev(0, 20, 200)).c_str(),
+    out("    left                  20-200 Hz %s dB   200 Hz-10 kHz %s dB\n", f1("%.1f", dev(0, 20, 200)).c_str(),
            f1("%.1f", dev(0, 200, 10000)).c_str());
-    printf("    right                 20-200 Hz %s dB   200 Hz-10 kHz %s dB\n", f1("%.1f", dev(1, 20, 200)).c_str(),
+    out("    right                 20-200 Hz %s dB   200 Hz-10 kHz %s dB\n", f1("%.1f", dev(1, 20, 200)).c_str(),
            f1("%.1f", dev(1, 200, 10000)).c_str());
   }
-  printf("  %s\n", green("Saved; the Room Correction panel shows the measured curves.").c_str());
+  out("  %s\n", green("Saved; the Room Correction panel shows the measured curves.").c_str());
   return 0;
 }
 
@@ -687,10 +892,10 @@ int run_verify(int, char**) {
 
 int run_setup(int, char**) {
   Config cfg = load_config();
-  printf("%s\n", bold("Room Correction — setup").c_str());
+  out("%s\n", bold("Room Correction — setup").c_str());
   auto card = find_x4_card();
   if (!card) {
-    printf("%s\n", red("Sound Blaster X4 not found.").c_str());
+    out("%s\n", red("Sound Blaster X4 not found.").c_str());
     return 1;
   }
   const std::string suffix = card->substr(std::string("alsa_card.").size());
@@ -698,26 +903,26 @@ int run_setup(int, char**) {
   const std::string sink51 = "alsa_output." + suffix + ".analog-surround-51";
   double prev_volume = sink_volume(stereo_sink);
 
-  printf("  Switching the X4 to its 5.1 profile (C/Sub jack becomes active)...\n");
+  out("  Switching the X4 to its 5.1 profile (C/Sub jack becomes active)...\n");
   run_cmd("pactl set-card-profile " + shell_quote(*card) + " output:analog-surround-51+input:analog-stereo");
   for (int i = 0; i < 50 && !sink_exists(sink51); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
   if (!sink_exists(sink51)) {
-    printf("%s\n", red("The 5.1 output did not appear.").c_str());
+    out("%s\n", red("The 5.1 output did not appear.").c_str());
     return 1;
   }
   // Keep the hardware level where it was: if the engine ever stops, audio
   // falls back to this sink and must not suddenly be louder.
   if (prev_volume > 0) set_sink_volume(sink51, prev_volume);
   cfg.output_device = sink51;
-  printf("  Output: %s\n", sink51.c_str());
+  out("  Output: %s\n", sink51.c_str());
 
   if (auto calfile = find_mic_cal_file()) {
     cfg.mic_cal = *calfile;
     try {
       load_cal_or_die(cfg);
-      printf("  Mic calibration: %s\n", cfg.mic_cal.c_str());
+      out("  Mic calibration: %s\n", cfg.mic_cal.c_str());
     } catch (const std::exception& e) {
-      printf("  %s\n", yellow(e.what()).c_str());
+      out("  %s\n", yellow(e.what()).c_str());
     }
   }
   save_config(cfg);
@@ -727,9 +932,9 @@ int run_setup(int, char**) {
     // The X4 keeps its old hardware level, so the engine starts at 100%.
     if (prev_volume > 0) set_sink_volume("roomcorr_sink", 1.0);
     run_cmd("pactl set-default-sink roomcorr_sink");
-    printf("  %s\n", green("Room Correction is now the default output.").c_str());
+    out("  %s\n", green("Room Correction is now the default output.").c_str());
   } else {
-    printf("  %s\n", yellow("Start the engine (systemctl --user enable --now roomcorr) and run setup again.").c_str());
+    out("  %s\n", yellow("Start the engine (systemctl --user enable --now roomcorr) and run setup again.").c_str());
   }
   return 0;
 }
