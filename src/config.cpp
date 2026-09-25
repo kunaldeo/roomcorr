@@ -104,6 +104,11 @@ Json Config::to_json() const {
   Json t = Json::object();
   t["bass_boost_db"] = target.bass_boost_db;
   t["bass_corner_hz"] = target.bass_corner_hz;
+  t["treble_db"] = target.treble_db;
+  t["treble_hz"] = target.treble_hz;
+  t["transition_hz"] = target.transition_hz;
+  t["hf_max_db"] = target.hf_max_db;
+  t["auto_crossover"] = target.auto_crossover;
   t["tilt_db_per_oct"] = target.tilt_db_per_oct;
   t["tilt_start_hz"] = target.tilt_start_hz;
   t["max_boost_db"] = target.max_boost_db;
@@ -138,6 +143,11 @@ Config Config::from_json(const Json& j) {
   const Json& t = j.get("target");
   c.target.bass_boost_db = t.get("bass_boost_db").as_num(c.target.bass_boost_db);
   c.target.bass_corner_hz = t.get("bass_corner_hz").as_num(c.target.bass_corner_hz);
+  c.target.treble_db = t.get("treble_db").as_num(c.target.treble_db);
+  c.target.treble_hz = t.get("treble_hz").as_num(c.target.treble_hz);
+  c.target.transition_hz = t.get("transition_hz").as_num(c.target.transition_hz);
+  c.target.hf_max_db = t.get("hf_max_db").as_num(c.target.hf_max_db);
+  c.target.auto_crossover = t.get("auto_crossover").as_bool(c.target.auto_crossover);
   c.target.tilt_db_per_oct = t.get("tilt_db_per_oct").as_num(c.target.tilt_db_per_oct);
   c.target.tilt_start_hz = t.get("tilt_start_hz").as_num(c.target.tilt_start_hz);
   c.target.max_boost_db = t.get("max_boost_db").as_num(c.target.max_boost_db);

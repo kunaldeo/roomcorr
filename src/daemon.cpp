@@ -74,7 +74,7 @@ private:
   int64_t save_due_ = 0;
   int exit_code_ = 0;
 
-  float tmp_in_[2][kMaxFrames] = {};
+  float tmp_in_[kNumOut][kMaxFrames] = {};
 };
 
 // ------------------------------------------------------------------ realtime
@@ -108,8 +108,8 @@ void Daemon::on_playback_process(void* data) {
   for (uint32_t i = 0; i < ob->n_datas; ++i) n = std::min(n, ob->datas[i].maxsize / uint32_t(sizeof(float)));
   if (out->requested > 0) n = std::min<uint32_t>(n, uint32_t(out->requested));
 
-  const float* ip[2];
-  for (int c = 0; c < 2; ++c) {
+  const float* ip[kNumOut];
+  for (int c = 0; c < kNumOut; ++c) {
     uint32_t have = 0;
     if (in && uint32_t(c) < in->buffer->n_datas && in->buffer->datas[c].data) {
       spa_data& d = in->buffer->datas[c];
@@ -159,7 +159,7 @@ void Daemon::on_playback_state(void* data, pw_stream_state, pw_stream_state stat
 bool Daemon::create_capture() {
   pw_properties* props = pw_properties_new(
       PW_KEY_MEDIA_CLASS, "Audio/Sink", PW_KEY_NODE_NAME, kSinkName, PW_KEY_NODE_DESCRIPTION, "Room Correction",
-      PW_KEY_NODE_GROUP, "roomcorr", "node.link-group", "roomcorr", SPA_KEY_AUDIO_POSITION, "[ FL, FR ]", PW_KEY_NODE_VIRTUAL, "true",
+      PW_KEY_NODE_GROUP, "roomcorr", "node.link-group", "roomcorr", SPA_KEY_AUDIO_POSITION, "[ FL, FR, FC, LFE, RL, RR ]", PW_KEY_NODE_VIRTUAL, "true",
       // As in PipeWire's loopback: both halves run in the same graph cycle,
       // so the adapters must not rate-match (it drops samples every cycle).
       "resample.disable", "true", "resample.prefill", "true",
@@ -175,8 +175,11 @@ bool Daemon::create_capture() {
 
   uint8_t buf[1024];
   spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof buf);
-  const uint32_t pos[2] = {SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR};
-  const spa_pod* params[1] = {audio_format(&b, 2, pos)};
+  // 5.1 input so films and games keep their LFE channel; stereo streams
+  // link to FL/FR only.
+  const uint32_t pos[6] = {SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR, SPA_AUDIO_CHANNEL_FC,
+                           SPA_AUDIO_CHANNEL_LFE, SPA_AUDIO_CHANNEL_RL, SPA_AUDIO_CHANNEL_RR};
+  const spa_pod* params[1] = {audio_format(&b, 6, pos)};
   // ASYNC: our process() only triggers the playback side, which dequeues
   // this stream's buffers from its own callback. Without the flag PipeWire
   // assumes a buffer is consumed inside process() and the pair runs only

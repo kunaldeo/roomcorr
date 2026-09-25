@@ -1,7 +1,10 @@
 // The realtime DSP graph, independent of PipeWire so it can be tested offline.
 //
+// Input is 5.1 (stereo sources simply leave FC/LFE/RL/RR silent). Like an
+// AV receiver with "small" mains and one sub:
+//   FC, RL, RR fold into L/R (ITU downmix, -3 dB)
 //   L,R ─ preamp ─ tone ─┬─ HPF ─ FIR[left/right] ─ trim ─ delay ─┐
-//                        └─ (L+R) ─ LPF ─ FIR[sub] ─ trim/pol ─ delay ─┤─ bypass xfade ─ limiter ─ outputs
+//                        └─ LPF(L+R) + LFE·(+10 dB) ─ FIR[sub] ─ trim/pol ─ delay ─┤─ bypass ─ limiter ─ out
 //
 // Audio arrives in arbitrary chunk sizes; internally everything runs in
 // fixed blocks of kBlock samples, which is also the engine's latency.
@@ -66,7 +69,8 @@ public:
   void collect_garbage();
   EngineStats read_stats();  // resets the peak-hold values
 
-  // Realtime. in: 2 planar channels, out: kNumOut planar channels.
+  // Realtime. in and out: kNumOut planar channels (FL FR FC LFE RL RR);
+  // null input pointers are silence.
   void process(const float* const* in, float* const* out, int n);
 
 private:
@@ -85,12 +89,12 @@ private:
 
   // Block FIFO
   int fifo_pos_ = 0;
-  float in_blk_[2][kBlock] = {};
+  float in_blk_[kNumOut][kBlock] = {};
   float out_blk_[kNumOut][kBlock] = {};
 
   // DSP state
   Biquad low_shelf_[2], high_shelf_[2];
-  LinkwitzRiley hp_[2], lp_;
+  LinkwitzRiley hp_[2], lp_, lfe_lp_;
   std::unique_ptr<Convolver> conv_[kNumChans];
   std::vector<float> delay_buf_[kNumChans];
   int delay_pos_ = 0;

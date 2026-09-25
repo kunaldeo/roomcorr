@@ -23,15 +23,27 @@ struct ChannelConfig {
   double filter_peak_db = 0;  // max boost of the FIR, for headroom
 };
 
+// House curve. Defaults follow the Harman in-room target (Olive, Welti &
+// McMullin 2013): a 2nd-order +6.6 dB bass shelf at 105 Hz and a -2.4 dB
+// treble shelf above ~2.5 kHz, which listeners consistently preferred.
 struct TargetCurve {
-  double bass_boost_db = 4.0;   // low-shelf lift of the house curve
-  double bass_corner_hz = 120;  // where the lift is half done
-  double tilt_db_per_oct = -0.6;  // treble tilt
+  double bass_boost_db = 6.5;   // low-shelf lift
+  double bass_corner_hz = 105;  // shelf midpoint
+  double treble_db = -2.5;      // high-shelf (negative = gentle roll-off)
+  double treble_hz = 2500;
+  double tilt_db_per_oct = 0;   // optional extra tilt above tilt_start_hz
   double tilt_start_hz = 1000;
   double max_boost_db = 4.0;    // never fill a dip by more than this
   double max_cut_db = 15.0;
   double low_hz = 0;            // 0 = derived from each speaker's roll-off
   double high_hz = 20000;       // correction upper limit
+  // Above the room's transition frequency a single mic mostly measures
+  // reflections, and narrow EQ there makes speakers sound hollow (Toole).
+  // Full-resolution correction below `transition_hz`, only broad
+  // (octave-smoothed, +/- hf_max_db) correction above twice that.
+  double transition_hz = 250;
+  double hf_max_db = 2.0;
+  bool auto_crossover = true;   // pick the crossover that sums best in the room
 };
 
 struct Config {

@@ -33,9 +33,13 @@ struct DesignResult {
   Json report;                     // response.json for the plugin graph
   std::vector<std::string> notes;  // human-readable summary
   std::vector<std::string> warnings;
+  double bass_deviation_db = 99;  // predicted, 25-250 Hz, RMS from target
 };
 
 DesignResult design_filters(const Config& in, const MeasurementSet& m, const MicCal& cal);
+
+// design_filters at the best crossover when target.auto_crossover is set.
+DesignResult design_best(const Config& in, const MeasurementSet& m, const MicCal& cal);
 
 // Writes filters to data_dir()/filters and the report to
 // data_dir()/response.json, and points result.cfg at them.

@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "kunal.roomcorr",
+  "name": "Room Correction",
+  "version": "1.0.0",
+  "author": "Kunal",
+  "license": "MIT",
+  "description": "Monitor and control the roomcorr engine: room EQ, bass management, sub level, crossover, meters and measured response.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Room Correction",
+    "description": "Room EQ and subwoofer bass management with live meters.",
+    "category": "Audio",
+    "aliases": ["roomcorr", "room correction", "dirac", "eq", "subwoofer"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "meterRefreshMs": 60
+    },
+    "schema": [
+      { "key": "meterRefreshMs", "type": "integer", "label": "Meter refresh while open (ms)", "min": 30, "max": 500, "step": 10, "defaultValue": 60 }
+    ]
+  }
+}

@@ -11,6 +11,8 @@
 
 #include <fftw3.h>
 
+#include "dsp/biquad.hpp"
+
 namespace rc {
 
 static std::mutex g_plan_mutex;
@@ -396,9 +398,12 @@ std::vector<cplx> windowed_response(const std::vector<double>& ir, long start, s
 // ------------------------------------------------------------ design
 
 double target_db(const TargetCurve& t, double f) {
-  double bass = t.bass_boost_db / (1.0 + (f / t.bass_corner_hz) * (f / t.bass_corner_hz));
+  // Shelves evaluated as the same biquads the engine's tone controls use.
+  const double fs = 192000;  // high rate: no cramping near 20 kHz
+  double bass = 20 * std::log10(std::abs(BiquadCoeffs::lowshelf(t.bass_corner_hz, t.bass_boost_db, fs).response(f, fs)));
+  double treble = 20 * std::log10(std::abs(BiquadCoeffs::highshelf(t.treble_hz, t.treble_db, fs).response(f, fs)));
   double tilt = f > t.tilt_start_hz ? t.tilt_db_per_oct * std::log2(f / t.tilt_start_hz) : 0;
-  return bass + tilt;
+  return bass + treble + tilt;
 }
 
 std::vector<float> minphase_fir(const std::vector<double>& grid, const std::vector<double>& db, int taps, int fs) {

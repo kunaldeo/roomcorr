@@ -53,6 +53,9 @@ EngineParams EngineParams::from_config(const Config& c) {
 Engine::Engine() {
   for (auto& c : conv_) c = std::make_unique<Convolver>(kBlock, kMaxTaps);
   for (auto& d : delay_buf_) d.assign(kDelayMask + 1, 0.f);
+  // The LFE channel is band-limited to 120 Hz by convention; filter it
+  // there regardless of the crossover.
+  lfe_lp_.configure(24, false, 120, kSampleRate);
   smooth_coef_ = 1.0 - std::exp(-1.0 / (0.010 * kSampleRate));   // 10 ms
   release_coef_ = 1.0 - std::exp(-1.0 / (0.150 * kSampleRate));  // 150 ms
   apply_params(p_);
@@ -137,7 +140,7 @@ void Engine::process(const float* const* in, float* const* out, int n) {
   int i = 0;
   while (i < n) {
     int k = std::min(n - i, kBlock - fifo_pos_);
-    for (int c = 0; c < 2; ++c) {
+    for (int c = 0; c < kNumOut; ++c) {
       if (in[c])
         std::memcpy(&in_blk_[c][fifo_pos_], in[c] + i, sizeof(float) * size_t(k));
       else
@@ -161,6 +164,15 @@ void Engine::process(const float* const* in, float* const* out, int n) {
 void Engine::process_block() {
   const int B = kBlock;
   const EngineParams& p = p_;
+
+  // ---- 5.1 -> L/R fold-down (ITU-R BS.775): centre and surrounds at -3 dB.
+  // A stereo source leaves those channels at zero, so this is a no-op then.
+  constexpr float kFold = 0.70710678f;
+  for (int s = 0; s < B; ++s) {
+    float c = in_blk_[kOutFC][s] * kFold;
+    in_blk_[kOutFL][s] += c + in_blk_[kOutRL][s] * kFold;
+    in_blk_[kOutFR][s] += c + in_blk_[kOutRR][s] * kFold;
+  }
 
   // ---- input meters
   for (int c = 0; c < 2; ++c) {
@@ -192,7 +204,8 @@ void Engine::process_block() {
       // Redirected bass: both channels at unity, as an AV receiver does.
       // Calibration matches the sub's SPL to a single main speaker, so a mono
       // bass note lands at the same level it would from the pair of mains.
-      sub[s] = float(lp_.tick(l + r));
+      // Plus the LFE channel at its standard +10 dB in-band gain.
+      sub[s] = float(lp_.tick(l + r) + lfe_lp_.tick(in_blk_[kOutLFE][s] * g_pre_) * 3.16227766);
       if (p.mains_highpass) {
         l = hp_[0].tick(l);
         r = hp_[1].tick(r);

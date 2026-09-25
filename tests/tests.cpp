@@ -77,17 +77,20 @@ static void test_convolver() {
 
 // Pushes an impulse into the left input and returns the six outputs.
 static std::vector<std::vector<float>> engine_impulse(Engine& e, int len, int in_chan = 0) {
-  std::vector<float> in[2] = {std::vector<float>(len, 0.f), std::vector<float>(len, 0.f)};
+  std::vector<float> in[kNumOut];
+  for (auto& v : in) v.assign(size_t(len), 0.f);
   in[in_chan][0] = 1.f;
   std::vector<std::vector<float>> out(kNumOut, std::vector<float>(len));
-  const float* ip[2] = {in[0].data(), in[1].data()};
+  const float* ip[kNumOut];
+  for (int c = 0; c < kNumOut; ++c) ip[c] = in[c].data();
   float* op[kNumOut];
   for (int o = 0; o < kNumOut; ++o) op[o] = out[o].data();
   // Odd chunk sizes exercise the block FIFO.
   int pos = 0, chunk = 113;
   while (pos < len) {
     int n = std::min(chunk, len - pos);
-    const float* ic[2] = {ip[0] + pos, ip[1] + pos};
+    const float* ic[kNumOut];
+    for (int c = 0; c < kNumOut; ++c) ic[c] = ip[c] + pos;
     float* oc[kNumOut];
     for (int o = 0; o < kNumOut; ++o) oc[o] = op[o] + pos;
     e.process(ic, oc, n);
@@ -174,7 +177,7 @@ static void test_engine_crossover() {
   // Let the bypass crossfade settle before the impulse.
   std::vector<float> zeros(48000, 0.f);
   std::vector<std::vector<float>> sink(kNumOut, std::vector<float>(48000));
-  const float* zi[2] = {zeros.data(), zeros.data()};
+  const float* zi[kNumOut] = {zeros.data(), zeros.data(), nullptr, nullptr, nullptr, nullptr};
   float* so[kNumOut];
   for (int o = 0; o < kNumOut; ++o) so[o] = sink[o].data();
   e3.process(zi, so, 48000);
@@ -183,6 +186,37 @@ static void test_engine_crossover() {
   double subsum = 0;
   for (float v : out3[kOutFC]) subsum += std::fabs(v);
   CHECK(subsum < 1e-3, "bypass sub not silent: %g", subsum);
+}
+
+static void test_lfe() {
+  printf("5.1 input: LFE and centre\n");
+  Config c;
+  c.sub_outputs = {"LFE"};
+  c.limiter = false;
+  EngineParams p = EngineParams::from_config(c);
+  p.preamp_db = 0;
+  Engine e;
+  e.set_params(p);
+  const int len = 1 << 16;
+  auto out = engine_impulse(e, len, kOutLFE);
+  std::vector<double> sub(out[kOutLFE].begin(), out[kOutLFE].end()), fl(out[kOutFL].begin(), out[kOutFL].end());
+  auto S = rfft(sub, len);
+  size_t k40 = size_t(40.0 * len / kSampleRate);
+  // LFE plays +10 dB in band; LR4 at 120 Hz is -0.03 dB and the 80 Hz
+  // crossover LPF doesn't touch it.
+  CHECK(std::fabs(db(std::abs(S[k40])) - 10.0) < 0.2, "LFE gain at 40 Hz %.2f dB", db(std::abs(S[k40])));
+  double leak = 0;
+  for (float v : fl) leak += std::fabs(v);
+  CHECK(leak < 1e-6, "LFE leaked into the mains");
+
+  Engine e2;
+  e2.set_params(p);
+  auto oc = engine_impulse(e2, len, kOutFC);
+  std::vector<double> l(oc[kOutFL].begin(), oc[kOutFL].end()), r(oc[kOutFR].begin(), oc[kOutFR].end());
+  auto L = rfft(l, len), R = rfft(r, len);
+  size_t k1k = size_t(1000.0 * len / kSampleRate);
+  CHECK(std::fabs(db(std::abs(L[k1k])) + 3.01) < 0.1 && std::fabs(db(std::abs(R[k1k])) + 3.01) < 0.1,
+        "centre fold-down L %.2f R %.2f dB", db(std::abs(L[k1k])), db(std::abs(R[k1k])));
 }
 
 static void test_minphase() {
@@ -295,9 +329,9 @@ static void test_design() {
   for (auto& w2 : r.warnings) printf("    warning: %s\n", w2.c_str());
   CHECK(std::fabs(r.cfg.ch[kRight].delay_ms) < 0.05, "right delay %.3f", r.cfg.ch[kRight].delay_ms);
   CHECK(std::fabs(r.cfg.ch[kLeft].delay_ms - 42.0 / 48) < 0.05, "left delay %.3f want 0.875", r.cfg.ch[kLeft].delay_ms);
-  // The sub is 6 dB hot, but the target asks for ~3 dB of bass lift in its
-  // band, so the trim lands between the two.
-  CHECK(r.cfg.ch[kSub].trim_db < -1 && r.cfg.ch[kSub].trim_db > -6, "sub trim %.2f", r.cfg.ch[kSub].trim_db);
+  // The sub is 6 dB hot and the Harman target asks for ~6 dB of bass lift
+  // in its band, so almost no trim is needed.
+  CHECK(r.cfg.ch[kSub].trim_db < 2 && r.cfg.ch[kSub].trim_db > -4, "sub trim %.2f", r.cfg.ch[kSub].trim_db);
   CHECK(r.report.get("summary").get("crossover_sum_after").as_num() > 0.9, "crossover summation %.2f",
         r.report.get("summary").get("crossover_sum_after").as_num());
 
@@ -325,6 +359,7 @@ int main() {
   test_json();
   test_convolver();
   test_engine_crossover();
+  test_lfe();
   test_minphase();
   test_deconvolution();
   test_design();

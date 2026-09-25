@@ -118,7 +118,8 @@ DesignResult design_filters(const Config& in, const MeasurementSet& m, const Mic
 
   // ---- arrival times and spatially averaged magnitude responses
   std::vector<std::vector<double>> arrival(P, std::vector<double>(kNumChans));
-  std::vector<double> M[kNumChans], Mc[kNumChans];
+  std::vector<double> M[kNumChans], Mc[kNumChans], Moct[kNumChans];
+  std::vector<std::vector<double>> per_pos[kNumChans];
   for (int c = 0; c < kNumChans; ++c) {
     const bool is_sub = c == kSub;
     std::vector<double> acc(grid.size(), 0.0);
@@ -128,12 +129,14 @@ DesignResult design_filters(const Config& in, const MeasurementSet& m, const Mic
       arrival[p][size_t(c)] = is_sub ? arrival_time(ir, 30, 120, fs) : arrival_time(ir, 200, 5000, fs);
       auto pw = fdw_power(ir, arrival[p][size_t(c)], fs, nfft, is_sub ? 50 : 3, 15, 5, 500);
       auto db = smooth_to_grid(pw, bin, grid);
+      per_pos[c].push_back(smooth_grid(grid, db, 1.0 / 6));
       for (size_t i = 0; i < grid.size(); ++i) acc[i] += weight(p) * std::pow(10, (db[i] - cal.at(grid[i])) / 10);
       wsum += weight(p);
     }
     M[c].resize(grid.size());
     for (size_t i = 0; i < grid.size(); ++i) M[c][i] = 10 * std::log10(acc[i] / wsum + 1e-30);
     Mc[c] = smooth_grid(grid, M[c], 1.0 / 3);
+    Moct[c] = smooth_grid(grid, M[c], 1.0);
   }
 
   std::vector<double> T(grid.size());
@@ -182,6 +185,18 @@ DesignResult design_filters(const Config& in, const MeasurementSet& m, const Mic
   lo[kSub] = std::max({sub_lo, cfg.target.low_hz, 15.0});
   hi[kSub] = std::min(sub_hi, std::max(2 * xo, 160.0));
 
+  // Below the transition frequency: full-resolution correction of room
+  // modes. Above twice that: only a broad (octave-smoothed, +/-hf_max_db)
+  // tonal correction, since a mic there measures reflections the ear
+  // largely ignores and narrow EQ makes speakers sound hollow (Toole;
+  // Dirac ART works only up to 150 Hz for the same reason).
+  const double f_full = cfg.target.transition_hz, f_broad = 2 * cfg.target.transition_hz;
+  auto full_weight = [&](double f) {
+    if (f <= f_full) return 1.0;
+    if (f >= f_broad) return 0.0;
+    double x = std::log(f / f_full) / std::log(f_broad / f_full);
+    return 0.5 + 0.5 * std::cos(M_PI * x);
+  };
   std::vector<double> C[kNumChans];
   for (int c = 0; c < kNumChans; ++c) {
     C[c].resize(grid.size());
@@ -193,10 +208,23 @@ DesignResult design_filters(const Config& in, const MeasurementSet& m, const Mic
         // Only fill a dip as far as the surrounding third-octave is below
         // target: narrow nulls are cancellations that boost cannot fix.
         v = std::min({want_fine, std::max(want_coarse, 0.0) + 1.0, cfg.target.max_boost_db});
+        // With several positions, only boost dips that stay put: a null
+        // that moves with the mic is corrected at one seat and made worse
+        // at the next (Johansson, Dirac).
+        if (per_pos[c].size() >= 2) {
+          double mean = 0, sq = 0;
+          for (const auto& pp : per_pos[c]) mean += pp[i];
+          mean /= double(per_pos[c].size());
+          for (const auto& pp : per_pos[c]) sq += (pp[i] - mean) * (pp[i] - mean);
+          double spread = std::sqrt(sq / double(per_pos[c].size()));
+          v *= std::clamp((6.0 - spread) / 3.0, 0.0, 1.0);
+        }
       } else {
         v = std::max(want_fine, -cfg.target.max_cut_db);
       }
-      C[c][i] = v * band_taper(grid[i], lo[c], hi[c]);
+      double broad = std::clamp(T[i] + ref - (Moct[c][i] + trim[c]), -cfg.target.hf_max_db, cfg.target.hf_max_db / 2);
+      double w = full_weight(grid[i]);
+      C[c][i] = (w * v + (1 - w) * broad) * band_taper(grid[i], lo[c], hi[c]);
     }
     r.filters[c] = minphase_fir(grid, C[c], kFilterTaps, fs);
   }
@@ -206,6 +234,23 @@ DesignResult design_filters(const Config& in, const MeasurementSet& m, const Mic
   double delay_ms[kNumChans];
   delay_ms[kLeft] = (std::max(tL, tR) - tL) * 1000.0 / fs;
   delay_ms[kRight] = (std::max(tL, tR) - tR) * 1000.0 / fs;
+
+  // A big left/right difference almost always means the mic was off-center
+  // rather than an asymmetric room; applying it in full would pull the
+  // stereo image to one side at the real seat. Cap it and say so.
+  const double kMaxBalanceDb = 2.0, kMaxSkewMs = 1.0;
+  const double raw_balance = trim[kLeft] - trim[kRight], raw_skew = delay_ms[kLeft] - delay_ms[kRight];
+  if (std::fabs(raw_balance) > 2 * kMaxBalanceDb || std::fabs(raw_skew) > kMaxSkewMs) {
+    r.warnings.push_back(fmt("Left/right differ by %.1f dB", raw_balance) + fmt(" and %.2f ms at the mic;", raw_skew) +
+                         " limited to ±2 dB and 1 ms. Was the mic centred between the speakers?");
+  }
+  const double bal = std::clamp(raw_balance, -2 * kMaxBalanceDb, 2 * kMaxBalanceDb);
+  const double mid = (trim[kLeft] + trim[kRight]) / 2;
+  trim[kLeft] = mid + bal / 2;
+  trim[kRight] = mid - bal / 2;
+  const double skew = std::clamp(raw_skew, -kMaxSkewMs, kMaxSkewMs);
+  delay_ms[kLeft] = std::max(0.0, skew);
+  delay_ms[kRight] = std::max(0.0, -skew);
 
   // ---- sub alignment: pick the delay and polarity that make the sub and
   // the mains add up best through the crossover region, over all positions.
@@ -341,6 +386,22 @@ DesignResult design_filters(const Config& in, const MeasurementSet& m, const Mic
   sum["sub_range_hz"] = Json(std::vector<double>{sub_lo, sub_hi});
   sum["mains_low_hz"] = main_lo;
   sum["positions"] = int(P);
+  // Predicted bass accuracy at the listening area: RMS distance of the
+  // corrected system from the target over the sub's usable range to 250 Hz.
+  // Used to pick the crossover.
+  {
+    double sq = 0;
+    int n = 0;
+    for (size_t k = 0; k < F.size(); ++k) {
+      if (F[k] < std::max(sub_lo * 1.2, 25.0) || F[k] > 250) continue;
+      double t = interp_log(grid, T, F[k]) + ref;
+      sq += std::pow(sys_after[k] - t, 2);
+      ++n;
+    }
+    r.bass_deviation_db = n ? std::sqrt(sq / n) : 99;
+    sum["bass_deviation_db"] = r.bass_deviation_db;
+  }
+  sum["crossover_hz"] = xo;
   rep["summary"] = sum;
   r.report = rep;
 
@@ -361,12 +422,42 @@ DesignResult design_filters(const Config& in, const MeasurementSet& m, const Mic
     r.warnings.push_back(fmt("The sub needs %+.0f dB of digital gain. Turn the sub's volume knob up and recalibrate.", trim[kSub]));
   if (trim[kSub] < -12)
     r.warnings.push_back(fmt("The sub is %.0f dB too loud. Turn its volume knob down and recalibrate.", -trim[kSub]));
-  if (std::fabs(trim[kLeft] - trim[kRight]) > 3)
-    r.warnings.push_back("Left and right differ by more than 3 dB: check the Marantz balance knob and speaker wiring.");
   if (score_after < 0.7)
     r.warnings.push_back("Sub and mains do not sum well through the crossover even after alignment; "
                          "try moving the sub or a different crossover frequency.");
   return r;
+}
+
+DesignResult design_best(const Config& in, const MeasurementSet& m, const MicCal& cal) {
+  if (!in.target.auto_crossover || !in.bass_management) return design_filters(in, m, cal);
+  // Like Dirac's Bass Control: try each crossover and keep the one whose
+  // predicted bass is closest to target in this room. A pull toward 80 Hz
+  // (the THX default; 0.6 dB per 20 Hz) keeps it there unless another
+  // crossover is clearly better.
+  DesignResult best;
+  double best_score = 1e9;
+  std::string table;
+  for (double xo : {60.0, 70.0, 80.0, 90.0, 100.0, 110.0, 120.0}) {
+    Config c = in;
+    c.crossover_hz = xo;
+    DesignResult r = design_filters(c, m, cal);
+    // Don't hand the mains bass they can't play.
+    double mains_lo = r.report.get("summary").get("mains_low_hz").as_num(40);
+    if (xo < mains_lo * 1.5) continue;
+    double score = r.bass_deviation_db + 0.03 * std::fabs(xo - 80);
+    char buf[64];
+    snprintf(buf, sizeof buf, "%s%.0f Hz %.1f dB", table.empty() ? "" : ", ", xo, r.bass_deviation_db);
+    table += buf;
+    if (score < best_score) {
+      best_score = score;
+      best = std::move(r);
+    }
+  }
+  if (best_score >= 1e9) return design_filters(in, m, cal);
+  char buf[96];
+  snprintf(buf, sizeof buf, "Crossover:           %.0f Hz (auto; bass deviation per crossover: ", best.cfg.crossover_hz);
+  best.notes.insert(best.notes.begin(), std::string(buf) + table + ")");
+  return best;
 }
 
 void install_design(DesignResult& r) {

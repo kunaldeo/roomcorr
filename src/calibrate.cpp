@@ -467,7 +467,7 @@ int run_calibrate(int argc, char** argv) {
 
   step(7, "Design filters");
   cfg.positions = positions;
-  DesignResult r = design_filters(cfg, set, cal);
+  DesignResult r = design_best(cfg, set, cal);
   install_design(r);
   print_design(r);
   save_config(r.cfg);
@@ -537,7 +537,7 @@ int run_design(int argc, char** argv) {
   }
   MeasurementSet set = load_measurements(dir);
   MicCal cal = load_mic_cal(cfg.mic_cal);
-  DesignResult r = design_filters(cfg, set, cal);
+  DesignResult r = design_best(cfg, set, cal);
   install_design(r);
   print_design(r);
   save_config(r.cfg);
