@@ -21,7 +21,7 @@ Item {
 
   Socket {
     id: sock
-    path: (Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/roomcorr.sock"
+    path: Quickshell.env("ROOMCORR_SOCKET") || ((Quickshell.env("XDG_RUNTIME_DIR") || "/tmp") + "/roomcorr.sock")
     connected: true
     parser: SplitParser { onRead: function(line) { d.handle(line) } }
     onConnectionStateChanged: {

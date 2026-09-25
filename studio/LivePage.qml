@@ -45,7 +45,7 @@ Item {
 
         Graph {
           width: parent.width
-          height: Math.max(220, page.height - 330)
+          height: Math.max(220, page.height - 250)
           theme: page.theme
           xMin: 20
           xMax: 20000
