@@ -4,6 +4,9 @@
 #include <cmath>
 #include <cstring>
 #include <ctime>
+#if defined(__SSE__)
+#include <xmmintrin.h>
+#endif
 
 namespace rc {
 
@@ -97,6 +100,10 @@ EngineStats Engine::read_stats() {
   s.limiter_gr_db = gr_max_.exchange(0);
   s.clipped = clipped_.load();
   s.load = load_.exchange(0);
+  for (const auto& c : conv_) {
+    s.tail_misses += c->tail_misses();
+    s.idle_channels += c->idle() ? 1 : 0;
+  }
   return s;
 }
 
@@ -134,6 +141,11 @@ void Engine::apply_params(const EngineParams& p) {
 }
 
 void Engine::process(const float* const* in, float* const* out, int n) {
+#if defined(__SSE__)
+  // Flush denormals to zero: decaying filter tails otherwise produce them,
+  // and x86 handles denormal arithmetic very slowly.
+  _mm_setcsr(_mm_getcsr() | 0x8040);
+#endif
   timespec t0, t1;
   clock_gettime(CLOCK_MONOTONIC, &t0);
 

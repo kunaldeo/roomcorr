@@ -15,7 +15,7 @@ Measured with a miniDSP UMIK-1 (90° calibration file, mic pointing at the ceili
 
 | | |
 |---|---|
-| `roomcorr daemon` | Realtime C++ engine (PipeWire). 5.1/stereo in → tone → Linkwitz-Riley crossover (L+R and LFE to the sub) → 262 144-tap FIR room correction per channel → trims, delays, sub polarity → level-matched bypass → safety limiter. ~6% of one core. |
+| `roomcorr daemon` | Realtime C++ engine (PipeWire). 5.1/stereo in → tone → Linkwitz-Riley crossover (L+R and LFE to the sub) → 262 144-tap FIR room correction per channel → trims, delays, sub polarity → level-matched bypass → safety limiter. Two-stage convolution: the first 16 384 taps run in 256-sample partitions on the realtime thread, the tail in 8 192-sample partitions on a worker thread with a full block of slack; channels skip all work after their input has been silent longer than the filter. ~1% of one core while playing. |
 | `roomcorr calibrate` | Measurement wizard (terminal, or JSON-driven by the Studio). |
 | `roomcorr studio` | **Room Correction Studio**: live spectrum analyzer and signal flow, response graphs, target-curve editor, time/phase alignment views, and the graphical calibration. |
 | `kunal.roomcorr` | Omarchy bar widget: meters, volume, sub level, crossover, tone, switches, response graph, and Studio launch buttons. |

@@ -37,6 +37,8 @@ struct EngineStats {
   float limiter_gr_db = 0;   // largest gain reduction since last read
   uint64_t clipped = 0;      // samples that hit the limiter since start
   float load = 0;            // DSP time / audio time, max since last read
+  uint64_t tail_misses = 0;  // late tail blocks from the convolver workers (should be 0)
+  int idle_channels = 0;     // FIR channels currently skipping work (silence)
 };
 
 // Everything the audio thread needs, as plain values.

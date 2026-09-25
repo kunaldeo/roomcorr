@@ -248,8 +248,8 @@ Item {
             model: [
               ["Headroom", daemon.state ? page.fmtDb(daemon.state.preamp_db) : "—"],
               ["Limiter", page.st ? (page.st.limiter_db > 0.05 ? "−" + page.st.limiter_db.toFixed(1) + " dB" : "idle") : "—"],
-              ["Limited samples", page.st ? String(page.st.limited) : "—"],
-              ["DSP load", page.st ? (page.st.load * 100).toFixed(1) + "%" : "—"],
+              ["Limited / late blocks", page.st ? String(page.st.limited) + " / " + String(page.st.tail_misses || 0) : "—"],
+              ["DSP load", page.st ? (page.st.load * 100).toFixed(2) + "%" + (page.st.idle_channels === 3 ? " (idle)" : "") : "—"],
               ["Latency", daemon.state ? daemon.state.latency_ms.toFixed(1) + " ms + graph" : "—"],
               ["Sink / output", page.st ? page.st.sink_state + " / " + page.st.output_state : "offline"]
             ]

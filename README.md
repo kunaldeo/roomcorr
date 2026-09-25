@@ -49,8 +49,10 @@ flowchart LR
   down, and by how many dB, until it's in the green zone, like an AVR's level setup.
 - **Verification.** It measures the corrected system and shows measured vs predicted
   vs target.
-- **Fast, native engine.** C++20 with AVX-512 partitioned convolution on the
-  PipeWire realtime thread: a few percent of one core, 5 ms of added latency.
+- **Fast, native engine.** C++20, two-stage partitioned convolution with AVX-512:
+  the first 16k taps on PipeWire's realtime thread, the long tail on a worker
+  thread. Three 262k-tap filters cost about 1% of one core while playing,
+  nothing when silent, with 5 ms of added latency.
 
 ## Room Correction Studio
 

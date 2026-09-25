@@ -306,6 +306,8 @@ Json Daemon::status_json(bool spectrum) {
   j["limiter_db"] = std::round(s.limiter_gr_db * 10) / 10;
   j["limited"] = s.clipped;
   j["load"] = std::round(s.load * 1000) / 1000;
+  j["tail_misses"] = s.tail_misses;
+  j["idle_channels"] = s.idle_channels;
   j["sink_state"] = capture_state_;
   j["output_state"] = playback_state_;
   if (spectrum) {

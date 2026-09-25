@@ -44,6 +44,88 @@ static void test_json() {
   CHECK(c.set("crossover_hz", Json(5.0)) && c.crossover_hz == 30, "clamp");
 }
 
+// Reference: direct (FFT) linear convolution, truncated to x's length.
+static std::vector<double> reference_conv(const std::vector<float>& h, const std::vector<float>& x) {
+  size_t n = next_pow2(h.size() + x.size());
+  std::vector<double> hd(h.begin(), h.end()), xd(x.begin(), x.end());
+  auto H = rfft(hd, n), X = rfft(xd, n);
+  for (size_t k = 0; k < H.size(); ++k) H[k] *= X[k];
+  auto y = irfft(H, n);
+  y.resize(x.size());
+  return y;
+}
+
+static void test_two_stage_convolver() {
+  printf("two-stage convolver (long filter, switch, idle)\n");
+  std::mt19937 rng(7);
+  std::normal_distribution<float> nd;
+  const int B = 256, T = Convolver::kTailBlock;
+  // Long filter with a decaying tail well past the 2T head.
+  std::vector<float> h(60000), g(60000);
+  for (size_t i = 0; i < h.size(); ++i) {
+    h[i] = nd(rng) * std::exp(-float(i) / 15000.f) * 0.05f;
+    g[i] = nd(rng) * std::exp(-float(i) / 9000.f) * 0.05f;
+  }
+  const int blocks = 12 * T / B;
+  std::vector<float> x(size_t(blocks) * B);
+  for (auto& v : x) v = nd(rng);
+
+  {
+    Convolver c(B, 65536);
+    c.set_synchronous_for_tests(true);
+    c.set_filter(h);
+    std::vector<float> y(x.size());
+    // The filter is picked up at the first T boundary; feed silence first.
+    std::vector<float> zeros(size_t(T) * 3, 0.f), junk(size_t(T) * 3);
+    for (int b = 0; b < 3 * T / B; ++b) c.process(&zeros[size_t(b) * B], &junk[size_t(b) * B]);
+    for (int b = 0; b < blocks; ++b) c.process(&x[size_t(b) * B], &y[size_t(b) * B]);
+    auto ref = reference_conv(h, x);
+    double err = 0, mag = 0;
+    for (size_t i = 0; i < x.size(); ++i) {
+      err = std::max(err, std::fabs(ref[i] - y[i]));
+      mag = std::max(mag, std::fabs(ref[i]));
+    }
+    CHECK(err < 1e-4 * mag, "long filter max error %g (signal %g)", err, mag);
+    CHECK(c.tail_misses() == 0, "tail misses %llu", (unsigned long long)c.tail_misses());
+
+    // Switch to g mid-stream; once the crossfade is over the output must be
+    // the convolution of the whole input history with g.
+    std::vector<float> x2(size_t(8) * T), y2(x2.size());
+    for (auto& v : x2) v = nd(rng);
+    c.set_filter(g);
+    for (int b = 0; b < int(x2.size()) / B; ++b) c.process(&x2[size_t(b) * B], &y2[size_t(b) * B]);
+    std::vector<float> xall(x);
+    xall.insert(xall.end(), x2.begin(), x2.end());
+    auto refg = reference_conv(g, xall);
+    double err2 = 0, mag2 = 0;
+    for (size_t i = size_t(4) * T; i < x2.size(); ++i) {
+      err2 = std::max(err2, std::fabs(refg[x.size() + i] - y2[i]));
+      mag2 = std::max(mag2, std::fabs(refg[x.size() + i]));
+    }
+    CHECK(err2 < 1e-4 * mag2, "after switch max error %g (signal %g)", err2, mag2);
+    // No click at the switch: sample-to-sample change stays like the signal's.
+    double jump = 0;
+    for (size_t i = 1; i < size_t(4) * T; ++i) jump = std::max(jump, double(std::fabs(y2[i] - y2[i - 1])));
+    CHECK(jump < 4 * mag2, "switch discontinuity %g", jump);
+
+    // Idle: long silence, then sound again.
+    std::vector<float> sil(size_t(65536 + 4 * T), 0.f), ysil(sil.size());
+    for (int b = 0; b < int(sil.size()) / B; ++b) c.process(&sil[size_t(b) * B], &ysil[size_t(b) * B]);
+    CHECK(c.idle(), "convolver did not go idle");
+    std::vector<float> x3(size_t(6) * T), y3(x3.size());
+    for (auto& v : x3) v = nd(rng);
+    for (int b = 0; b < int(x3.size()) / B; ++b) c.process(&x3[size_t(b) * B], &y3[size_t(b) * B]);
+    CHECK(!c.idle(), "convolver stayed idle");
+    auto ref3 = reference_conv(g, x3);
+    double err3 = 0, mag3 = 0;
+    for (size_t i = 0; i < x3.size(); ++i) {
+      err3 = std::max(err3, std::fabs(ref3[i] - y3[i]));
+      mag3 = std::max(mag3, std::fabs(ref3[i]));
+    }
+    CHECK(err3 < 1e-4 * mag3, "after idle max error %g (signal %g)", err3, mag3);
+  }
+}
+
 static void test_convolver() {
   printf("convolver\n");
   std::mt19937 rng(1);
@@ -358,6 +440,7 @@ static void test_design() {
 int main() {
   test_json();
   test_convolver();
+  test_two_stage_convolver();
   test_engine_crossover();
   test_lfe();
   test_minphase();
