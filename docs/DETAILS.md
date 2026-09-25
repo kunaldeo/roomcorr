@@ -1,7 +1,8 @@
 # roomcorr
 
 Room correction and AV-receiver-style bass management for a PipeWire desktop,
-built for a 2.1 system:
+built for two speakers plus a subwoofer, fed from a sound card's discrete 5.1 outputs
+(not a 2.1 system with its own bass routing):
 
 ```
 apps ─► "Room Correction" sink ─► roomcorr engine ─► Sound Blaster X4 (5.1 profile)

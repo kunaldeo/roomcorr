@@ -54,12 +54,19 @@ sub is actually connected to.
 What you actually need:
 
 - **A Linux computer with PipeWire.** A laptop or desktop is fine; the engine uses about 1% of one CPU core.
-- **An audio interface with a separate output for the subwoofer.** This is the one hard
-  requirement: the sub needs its own channel so roomcorr can route bass to it.
-  Any USB or internal sound card with a 5.1 (or 2.1) analog output works: front
-  L/R to the amp, centre/LFE to the sub. That includes many motherboards' green/orange jacks.
+- **An audio interface with discrete 5.1 (or 7.1) analog outputs.** This is the one
+  hard requirement: the sub needs its own untouched channel so roomcorr can route
+  bass to it. Front L/R go to the amp, centre/LFE to the sub. Many USB and internal
+  sound cards qualify, including many motherboards' green/orange jacks.
+  **2.1 won't work.** 2.1 speaker systems, a sound card's 2.1 mode, or a sub fed
+  from the amp's speaker/pre-outs all apply their own bass routing and crossover,
+  which would fight roomcorr's. Also turn off any bass redirection or speaker
+  "enhancement" in the sound card's own software, so every output is passed
+  through untouched.
 - **Any stereo amplifier or powered speakers** for the mains.
-- **Any powered subwoofer** with an RCA line or LFE input.
+- **Any powered subwoofer** with an RCA line or LFE input. Set its own low-pass
+  to maximum (or use the LFE input, which bypasses it) so roomcorr's crossover is
+  the only one.
 - **A calibrated USB measurement mic** (miniDSP UMIK-1/UMIK-2 or similar) with its calibration file.
 
 `roomcorr setup` configures the Sound Blaster X4 automatically. With another
