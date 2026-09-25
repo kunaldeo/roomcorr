@@ -81,6 +81,20 @@ and set `output_device` in `~/.config/roomcorr/config.json` to that sink's
 name (`pactl list short sinks`). For a mic other than the UMIK, set `mic_match`
 to part of its name.
 
+## Measure, apply and prove it: all in one go
+
+Many calibration tools stop at a predicted "after" curve, or leave exporting
+filters, loading them into a player and re-measuring to you. roomcorr does
+the whole loop in one pass: it measures, builds the filters, **applies them to
+live audio immediately**, then **measures again through the corrected system**
+and shows you measured vs predicted vs target. You know it worked, not just
+that it should have.
+
+A one-position calibration, from the first test tone to a verified result,
+takes about **1½ minutes**: room noise ~4 s, finding the sub ~10 s, levels
+~18 s, the measurement sweeps ~26 s, filter design ~4 s and verification
+~26 s. Each extra mic position adds about 26 s.
+
 ## What it does
 
 - **Room correction.** Log-sweep measurements at several mic positions become
