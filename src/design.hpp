@@ -22,7 +22,7 @@ struct MeasurementSet {
 };
 
 constexpr int kIrLength = 1 << 17;  // 2.7 s at 48 kHz
-constexpr int kFilterTaps = 32768;  // 0.68 s: 1.5 Hz resolution for the sub
+constexpr int kFilterTaps = 262144;  // 5.5 s: 0.18 Hz resolution, as long-FIR room EQ commonly uses
 
 MeasurementSet load_measurements(const std::string& dir);  // throws
 void save_measurements(const MeasurementSet& m);          // writes dir/*

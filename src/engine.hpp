@@ -57,7 +57,7 @@ struct EngineParams {
 class Engine {
 public:
   static constexpr int kBlock = 256;
-  static constexpr int kMaxTaps = 65536;
+  static constexpr int kMaxTaps = 262144;
   static constexpr int kMaxDelay = 4096;  // 85 ms
 
   Engine();

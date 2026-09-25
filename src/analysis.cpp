@@ -437,23 +437,25 @@ std::vector<float> minphase_fir(const std::vector<double>& grid, const std::vect
 }
 
 std::vector<cplx> fir_response(const std::vector<float>& h, const std::vector<double>& freqs, int fs) {
+  // One zero-padded FFT, then linear interpolation between bins: with 2x
+  // padding the bins are far finer than any feature of our filters.
+  std::vector<double> x(h.begin(), h.end());
+  const size_t N = next_pow2(h.size() * 2);
+  auto H = rfft(x, N);
   std::vector<cplx> out;
   out.reserve(freqs.size());
   for (double f : freqs) {
-    cplx rot = std::polar(1.0, -2 * M_PI * f / fs), ph = 1, acc = 0;
-    for (size_t i = 0; i < h.size(); ++i) {
-      acc += double(h[i]) * ph;
-      ph *= rot;
-      if ((i & 1023) == 1023) ph /= std::abs(ph);
-    }
-    out.push_back(acc);
+    double k = f * double(N) / fs;
+    size_t k0 = std::min(size_t(k), H.size() - 2);
+    double a = k - double(k0);
+    out.push_back(H[k0] * (1 - a) + H[k0 + 1] * a);
   }
   return out;
 }
 
 double fir_peak_db(const std::vector<float>& h) {
   std::vector<double> x(h.begin(), h.end());
-  auto X = rfft(x, next_pow2(h.size() * 4));
+  auto X = rfft(x, next_pow2(h.size() * 2));
   double mx = 0;
   for (const auto& v : X) mx = std::max(mx, std::abs(v));
   return 20 * std::log10(mx + 1e-30);

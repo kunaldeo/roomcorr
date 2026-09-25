@@ -347,6 +347,11 @@ Json Daemon::handle(int client, const Json& req) {
     }
     return state_json();
   }
+  if (cmd == "save") {
+    save_due_ = 0;
+    save_config(cfg_);
+    return state_json();
+  }
   if (cmd == "quiet") {
     // Temporary mute for measurements. It expires on its own, so a
     // calibration that crashes can't leave the speakers silent.

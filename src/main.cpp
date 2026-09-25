@@ -24,6 +24,8 @@ static void usage() {
   printf(
       "roomcorr — room correction and bass management for PipeWire\n\n"
       "  roomcorr daemon                 run the DSP engine (normally via systemd)\n"
+      "  roomcorr studio [live|response|alignment|calibrate]\n"
+      "                                  open Room Correction Studio\n"
       "  roomcorr setup                  switch the X4 to 5.1 and make Room Correction the default output\n"
       "  roomcorr calibrate [--positions N] [--mic-cal FILE] [--yes]\n"
       "                                  measure with the UMIK-1 and build filters\n"
@@ -44,6 +46,18 @@ static Json parse_value(const std::string& v) {
   if (end && *end == 0 && !v.empty()) return Json(d);
   if (!v.empty() && (v[0] == '[' || v[0] == '{')) return Json::parse(v);
   return Json(v);
+}
+
+// Opens Room Correction Studio (a Quickshell app). One instance: a second
+// launch just exits. The optional tab name is passed through the env.
+static int run_studio(int argc, char** argv) {
+  const char* home = getenv("HOME");
+  std::string dir = std::string(home ? home : "") + "/.local/share/roomcorr/studio";
+  if (const char* d = getenv("ROOMCORR_STUDIO_DIR")) dir = d;
+  if (argc > 0) setenv("ROOMCORR_STUDIO_TAB", argv[0], 1);
+  execlp("qs", "qs", "-n", "-p", dir.c_str(), (char*)nullptr);
+  perror("roomcorr: cannot start quickshell (qs)");
+  return 1;
 }
 
 static int run_ctl(int argc, char** argv) {
@@ -110,6 +124,7 @@ int main(int argc, char** argv) {
     if (cmd == "setup") return run_setup(argc - 2, argv + 2);
     if (cmd == "ctl") return run_ctl(argc - 2, argv + 2);
     if (cmd == "probe") return run_probe(argc - 2, argv + 2);
+    if (cmd == "studio") return run_studio(argc - 2, argv + 2);
     if (cmd == "-h" || cmd == "--help" || cmd == "help") {
       usage();
       return 0;
