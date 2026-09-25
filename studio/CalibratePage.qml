@@ -30,6 +30,7 @@ Item {
   property var design: null
   property var verify: null
   property var result: null            // { ok, error }
+  property string verifyState: ""      // "", "skipped" or "failed"
 
   property string mode: "calibrate"   // or "sublevel"
   readonly property var stepNames: mode === "sublevel"
@@ -44,6 +45,7 @@ Item {
     curPos = 0; posOf = positions; posHint = ""; posResults = {}; design = null; verify = null; result = null
     logText = ""
     subLive = null
+    verifyState = ""
   }
   function startSubLevel() {
     reset()
@@ -58,7 +60,7 @@ Item {
     proc.running = true
   }
   function startVerify() {
-    verify = null; result = null; prompt = null; step = 8
+    verify = null; result = null; prompt = null; step = 8; verifyState = ""; mode = "calibrate"
     verifyProc.running = true
   }
   function answer(text) {
@@ -94,6 +96,8 @@ Item {
     case "snr": { var r = Object.assign({}, posResults); r[e.position] = e; posResults = r; measureLeft = 0; break }
     case "design": design = e; step = 7; break
     case "verify": verify = e; break
+    case "verify_skipped": verifyState = "skipped"; break
+    case "verify_failed": verifyState = "failed"; break
     case "done": result = e; prompt = null; measureLeft = 0; if (e.ok && step < 7) step = 7; break
     }
   }
@@ -204,17 +208,21 @@ Item {
             required property var modelData
             required property int index
             readonly property int n: index + 1
-            readonly property bool done: page.step > n || !!(page.result && page.result.ok && page.step >= n)
+            // The verify step can end skipped or failed instead of done.
+            readonly property string outcome: page.mode === "calibrate" && n === 8 && page.verifyState !== "" && !current
+                                              ? page.verifyState : ""
+            readonly property bool done: outcome === "" && (page.step > n || !!(page.result && page.result.ok && page.step >= n))
             readonly property bool current: page.step === n && page.running
             spacing: 10
             Rectangle {
               width: 22; height: 22; radius: 11
-              color: parent.done ? page.theme.green : parent.current ? page.theme.accent : "transparent"
-              border.color: parent.done || parent.current ? "transparent" : page.theme.alpha(page.theme.fg, 0.25)
+              color: stepRow.outcome === "failed" ? page.theme.red
+                   : stepRow.done ? page.theme.green : stepRow.current ? page.theme.accent : "transparent"
+              border.color: stepRow.done || stepRow.current || stepRow.outcome === "failed" ? "transparent" : page.theme.alpha(page.theme.fg, 0.25)
               Text {
                 anchors.centerIn: parent
-                text: parent.parent.done ? "✓" : String(parent.parent.n)
-                color: parent.parent.done || parent.parent.current ? page.theme.bg : page.theme.muted
+                text: stepRow.outcome === "skipped" ? "–" : stepRow.outcome === "failed" ? "!" : stepRow.done ? "✓" : String(stepRow.n)
+                color: stepRow.done || stepRow.current || stepRow.outcome === "failed" ? page.theme.bg : page.theme.muted
                 font.family: page.theme.font
                 font.pixelSize: 11
                 font.bold: true
@@ -229,8 +237,9 @@ Item {
             }
             Text {
               anchors.verticalCenter: parent.verticalCenter
-              text: modelData
-              color: parent.current ? page.theme.fg : parent.done ? page.theme.fgLight : page.theme.muted
+              text: modelData + (stepRow.outcome === "skipped" ? "  (skipped)" : stepRow.outcome === "failed" ? "  (failed)" : "")
+              color: stepRow.outcome === "failed" ? page.theme.red
+                   : parent.current ? page.theme.fg : parent.done ? page.theme.fgLight : page.theme.muted
               font.family: page.theme.font
               font.pixelSize: 12
               font.bold: parent.current
@@ -264,7 +273,10 @@ Item {
             wrapMode: Text.WordWrap
             text: page.prompt ? page.prompt.text
                 : page.measureLeft > 0 ? "Measuring position " + page.curPos + "… stay quiet (" + Math.ceil(page.measureLeft) + " s)"
-                : page.result ? (page.result.ok ? (page.mode === "sublevel" ? "Sub level set. Recalibrate (or Rebuild filters) so the correction matches the new knob position." : "Done. The new correction is active.")
+                : page.result ? (page.result.ok ? (page.mode === "sublevel" ? "Sub level set. Recalibrate (or Rebuild filters) so the correction matches the new knob position."
+                                                   : page.verifyState === "skipped" ? "Done. The new correction is active. Verification was skipped: use Verify on the right any time."
+                                                   : page.verifyState === "failed" ? "Done. The new correction is active, but verification failed (see log). Try Verify again."
+                                                   : "Done. The new correction is active and verified.")
                                                 : "Stopped: " + (page.result.error || "see log"))
                 : page.running ? (page.step > 0 ? page.stepNames[page.step - 1] + "…" : "Starting…")
                 : "Ready. Choose the number of mic positions and press Start."

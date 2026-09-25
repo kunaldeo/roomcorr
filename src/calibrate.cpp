@@ -694,9 +694,16 @@ static int calibrate_impl(int argc, char** argv) {
     out("  %s\n", yellow("The roomcorr daemon isn't running; start it with `systemctl --user start roomcorr`.").c_str());
   restore();
 
+  step(8, "Verify");
   out("\n  Verification plays sweeps through the corrected system to confirm the result.\n");
   if (yes("  Run verification now (mic at the main position)?")) {
-    verify_impl();
+    if (verify_impl() != 0) {
+      if (g_json) emit(event("verify_failed"));
+      out("  %s\n", yellow("Verification failed; the new filters are still active. Retry it with `roomcorr verify`.").c_str());
+    }
+  } else {
+    if (g_json) emit(event("verify_skipped"));
+    out("  %s\n", dim("Verification skipped; run it any time with `roomcorr verify`.").c_str());
   }
   out("\n%s\n", green(bold("Done. Enjoy the music.")).c_str());
   return 0;
