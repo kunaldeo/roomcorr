@@ -316,8 +316,55 @@ DesignResult design_filters(const Config& in, const MeasurementSet& m, const Mic
         best_pol = pol;
       }
     }
-  const double score_before = score(0, 1), score_after = score(best_d, best_pol);
+  const double score_before = score(0, 1);
   delay_ms[kSub] = best_d;
+
+  // ---- joint system correction (bass). Each channel was corrected on its
+  // own, but at the seat L, R and the sub add up: room modes excited by all
+  // of them together still stick out in the sum. A correction applied
+  // equally to all three filters scales that sum exactly and leaves the
+  // alignment untouched, so fold one in below the transition frequency.
+  // This is the idea behind Dirac's Bass Control.
+  auto system_db = [&]() {
+    std::vector<double> out(F.size());
+    for (size_t k = 0; k < F.size(); ++k) {
+      double a = 0, ws = 0;
+      for (size_t p = 0; p < P; ++p) {
+        cplx sub = cfg.bass_management ? Sb[p * F.size() + k] * best_pol * std::polar(1.0, -2 * M_PI * F[k] * best_d / 1000) : cplx(0);
+        a += weight(p) * std::norm(Mn[p * F.size() + k] + sub);
+        ws += weight(p);
+      }
+      out[k] = 10 * std::log10(a / ws + 1e-30) - 6.02 - cal.at(F[k]);
+    }
+    return out;
+  };
+  {
+    auto S = system_db();
+    auto S_fine = smooth_grid(F, S, 1.0 / 12), S_coarse = smooth_grid(F, S, 1.0 / 3);
+    std::vector<double> G(F.size());
+    for (size_t k = 0; k < F.size(); ++k) {
+      double t = interp_log(grid, T, F[k]) + ref;
+      double e = t - S_fine[k], g;
+      if (e > 0)
+        g = std::min({e, std::max(t - S_coarse[k], 0.0) + 1.0, cfg.target.max_boost_db});
+      else
+        g = std::max(e, -cfg.target.max_cut_db);
+      G[k] = g * band_taper(F[k], std::max(sys_lo, 20.0), cfg.target.transition_hz);
+    }
+    for (int c = 0; c < kNumChans; ++c) {
+      for (size_t i = 0; i < grid.size(); ++i)
+        if (grid[i] >= F.front() && grid[i] <= F.back())
+          C[c][i] = std::clamp(C[c][i] + interp_log(F, G, grid[i]), -24.0, cfg.target.max_boost_db + 2);
+      r.filters[c] = minphase_fir(grid, C[c], kFilterTaps, fs);
+      CF[c] = fir_response(r.filters[c], F, fs);
+    }
+    for (size_t p = 0; p < P; ++p)
+      for (size_t k = 0; k < F.size(); ++k) {
+        Mn[p * F.size() + k] = mains_at(p, k, true);
+        Sb[p * F.size() + k] = sub_at(p, k);
+      }
+  }
+  const double score_after = score(best_d, best_pol);
 
   for (int c = 0; c < kNumChans; ++c) {
     cfg.ch[c].trim_db = trim[c];
@@ -373,8 +420,10 @@ DesignResult design_filters(const Config& in, const MeasurementSet& m, const Mic
   }
   Json sys = Json::object();
   sys["freqs"] = round_vec(F);
-  sys["before"] = round_vec(sys_before, off);
-  sys["after"] = round_vec(sys_after, off);
+  // Displayed at 1/24 octave; the raw 1/48-octave curves are mostly
+  // position-specific comb ripple.
+  sys["before"] = round_vec(smooth_grid(F, sys_before, 1.0 / 24), off);
+  sys["after"] = round_vec(smooth_grid(F, sys_after, 1.0 / 24), off);
   rep["system"] = sys;
 
   // Timing: energy-time curves at the main position (what each speaker's
@@ -404,6 +453,24 @@ DesignResult design_filters(const Config& in, const MeasurementSet& m, const Mic
       arr[kChanNames[c]] = (arrival[0][size_t(c)] - first) * 1000.0 / fs;
       del[kChanNames[c]] = delay_ms[c];
     }
+    // The same, all three band-limited to the crossover region: sub and
+    // mains then have the same time resolution and can be compared.
+    Json xb = Json::object();
+    for (int c = 0; c < kNumChans; ++c) {
+      auto env = envelope(m.irs[0][size_t(c)], xo / 2, xo * 2, fs);
+      double pk = *std::max_element(env.begin(), env.end());
+      std::vector<double> etc;
+      for (int b = 0; b < bins; ++b) {
+        double mx = 0;
+        for (int i = 0; i < step; ++i) {
+          long k = start + long(b * step + i);
+          if (k >= 0 && k < long(env.size())) mx = std::max(mx, env[size_t(k)]);
+        }
+        etc.push_back(std::max(-60.0, 20 * std::log10(mx / pk + 1e-12)));
+      }
+      xb[kChanNames[c]] = round_vec(etc);
+    }
+    tj["crossover_band"] = xb;
     tj["arrival_ms"] = arr;
     tj["delay_ms"] = del;
     rep["timing"] = tj;

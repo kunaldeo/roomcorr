@@ -110,8 +110,8 @@ Panel {
     designProc.running = true
   }
 
-  function runInTerminal(cmd) {
-    Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation", cmd])
+  function openStudio(tab) {
+    Quickshell.execDetached(["roomcorr", "studio", tab || "live"])
     root.close()
   }
 
@@ -139,7 +139,7 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: ""
+    text: "󰓃"
     labelVisible: !vertical
     hasVisualContent: true
     // Tinted while bypassed/offline, so a glance says the EQ isn't running.
@@ -157,7 +157,7 @@ Panel {
       anchors.centerIn: parent
       width: Style.bar.iconSlot
       height: Style.bar.iconSlot
-      text: ""
+      text: "󰓃"
       fontFamily: button.fontFamily
       fontSize: Style.bar.iconFont
       color: button.active ? button.activeColor : button.foreground
@@ -197,7 +197,7 @@ Panel {
           Text {
             id: heroIcon
             textFormat: Text.PlainText
-            text: ""
+            text: "󰓃"
             color: root.enabled && root.connected ? root.foreground : root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.display
@@ -516,24 +516,23 @@ Panel {
 
           Button {
             width: (parent.width - parent.spacing) / 2
-            text: "Calibration Studio"
-            iconText: ""
+            text: "Open Studio"
+            iconText: "\u{f0ea2}"
             foreground: root.foreground
             fontFamily: root.fontFamily
             fontSize: Style.font.bodySmall
             bordered: true
-            onClicked: root.runInTerminal("roomcorr calibrate")
+            onClicked: root.openStudio("live")
           }
           Button {
             width: (parent.width - parent.spacing) / 2
-            text: "Verify"
-            iconText: ""
+            text: "Calibrate…"
+            iconText: "\uf130"
             foreground: root.foreground
             fontFamily: root.fontFamily
             fontSize: Style.font.bodySmall
             bordered: true
-            enabled: root.connected && !!root.report
-            onClicked: root.runInTerminal("roomcorr verify")
+            onClicked: root.openStudio("calibrate")
           }
         }
       }
