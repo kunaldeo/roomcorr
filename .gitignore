@@ -1,1 +1,5 @@
 build/
+
+# debug audio dumps
+.in
+.out
