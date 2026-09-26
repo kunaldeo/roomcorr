@@ -300,12 +300,34 @@ void Engine::process_block() {
     tap_[kTapLeft][tp] = float(v[kLeft]);
     tap_[kTapRight][tp] = float(v[kRight]);
     tap_[kTapSub][tp] = float(v[kSub]);
+    bm_sub_out_[s] = float(v[kSub]);
     out_blk_[kOutFL][s] = float(v[kLeft]);
     out_blk_[kOutFR][s] = float(v[kRight]);
     for (int o = kOutFC; o < kNumOut; ++o) out_blk_[o][s] = p.sub_to[o] ? float(v[kSub]) : 0.f;
   }
 
   tap_pos_.store(tap_pos_.load(std::memory_order_relaxed) + uint32_t(B), std::memory_order_release);
+
+  // ---- shared audio for other programs (visualizers etc.)
+  if (shared_) {
+    const uint64_t w = __atomic_load_n(&shared_->write_frames, __ATOMIC_RELAXED);
+    const uint32_t mask = shared_->capacity - 1;
+    float* base = reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(shared_) + shared_->header_size);
+    const uint32_t cap = shared_->capacity;
+    const uint32_t at = uint32_t(w & mask);  // B divides capacity, so a block never wraps
+    std::memcpy(base + 0 * size_t(cap) + at, in_blk_[kOutFL], sizeof(float) * B);
+    std::memcpy(base + 1 * size_t(cap) + at, in_blk_[kOutFR], sizeof(float) * B);
+    std::memcpy(base + 2 * size_t(cap) + at, out_blk_[kOutFL], sizeof(float) * B);
+    std::memcpy(base + 3 * size_t(cap) + at, out_blk_[kOutFR], sizeof(float) * B);
+    float* sub = base + 4 * size_t(cap) + at;
+    for (int s = 0; s < B; ++s) sub[s] = float(bm_sub_out_[s]);
+    uint32_t flags = (p.enabled ? RC_AUDIO_FLAG_ENABLED : 0u) | (p.mute ? RC_AUDIO_FLAG_MUTED : 0u);
+    __atomic_store_n(&shared_->flags, flags, __ATOMIC_RELAXED);
+    timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    __atomic_store_n(&shared_->update_ns, uint64_t(now.tv_sec) * 1000000000ull + uint64_t(now.tv_nsec), __ATOMIC_RELAXED);
+    __atomic_store_n(&shared_->write_frames, w + uint64_t(B), __ATOMIC_RELEASE);
+  }
   for (int c = 0; c < kNumChans; ++c) {
     store_max(out_peak_[c], float(pk[c]));
     add_relaxed(out_sq_[c], sq[c]);

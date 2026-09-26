@@ -204,5 +204,12 @@ control, no clipping, and a sub that stays balanced with the speakers.
 Build requirements: CMake, a C++20 compiler, FFTW3, libsndfile, PipeWire
 headers. Quickshell for the Studio; Omarchy for the bar plugin.
 
+### Use its audio in other programs
+
+roomcorr shares its live audio (what's playing, and the corrected speaker and
+sub signals) through a lock-free shared-memory ring, plus engine state over a
+JSON socket, so visualizers, LED matrices and meters can use it. See
+[docs/SHARING.md](docs/SHARING.md).
+
 More detail (the calibration method, control protocol, development) is in
 [docs/DETAILS.md](docs/DETAILS.md).

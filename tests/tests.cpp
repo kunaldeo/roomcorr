@@ -301,6 +301,66 @@ static void test_lfe() {
         "centre fold-down L %.2f R %.2f dB", db(std::abs(L[k1k])), db(std::abs(R[k1k])));
 }
 
+static void test_shared_audio() {
+  printf("shared audio ring\n");
+  const uint32_t cap = 1 << 14, hdr = 256;
+  std::vector<uint8_t> mem(hdr + size_t(RC_AUDIO_CHANNELS) * cap * sizeof(float), 0);
+  auto* h = reinterpret_cast<rc_shared_audio_header*>(mem.data());
+  h->header_size = hdr;
+  h->capacity = cap;
+  h->channels = RC_AUDIO_CHANNELS;
+  h->sample_rate = kSampleRate;
+
+  Config c;
+  c.sub_outputs = {"LFE"};
+  c.limiter = false;
+  EngineParams p = EngineParams::from_config(c);
+  p.preamp_db = 0;
+  Engine e;
+  e.set_params(p);
+  e.set_shared_audio(h);
+
+  // 40 Hz left, 1 kHz right, in odd-sized chunks.
+  const int n = 12000;
+  std::vector<float> in[kNumOut], out[kNumOut];
+  for (auto& v : in) v.assign(n, 0.f);
+  for (auto& v : out) v.assign(n, 0.f);
+  for (int i = 0; i < n; ++i) {
+    in[0][size_t(i)] = 0.5f * std::sin(2 * M_PI * 40 * i / kSampleRate);
+    in[1][size_t(i)] = 0.5f * std::sin(2 * M_PI * 1000 * i / kSampleRate);
+  }
+  for (int pos = 0; pos < n;) {
+    int k = std::min(333, n - pos);
+    const float* ip[kNumOut];
+    float* op[kNumOut];
+    for (int ch = 0; ch < kNumOut; ++ch) {
+      ip[ch] = in[ch].data() + pos;
+      op[ch] = out[ch].data() + pos;
+    }
+    e.process(ip, op, k);
+    pos += k;
+  }
+  // The engine publishes whole 256-sample blocks with one block of latency.
+  const uint64_t w = rc_shared_audio_write_frames(h);
+  CHECK(w == uint64_t(n / Engine::kBlock) * Engine::kBlock, "write_frames %llu", (unsigned long long)w);
+  std::vector<float> got(4096);
+  uint64_t end = rc_shared_audio_read_latest(h, RC_AUDIO_IN_L, got.data(), 4096);
+  CHECK(end == w, "read_latest returned %llu", (unsigned long long)end);
+  double err = 0;
+  for (int i = 0; i < 4096; ++i) err = std::max(err, double(std::fabs(got[size_t(i)] - in[0][size_t(w - 4096 + uint64_t(i))])));
+  CHECK(err < 1e-6, "in_l differs from the input by %g", err);
+  // The sub ring carries exactly what went to the LFE output (the engine's
+  // output lags its input by one block).
+  rc_shared_audio_read_latest(h, RC_AUDIO_OUT_SUB, got.data(), 4096);
+  double err2 = 0;
+  for (int i = 0; i < 4096; ++i) {
+    size_t at = size_t(w - 4096 + uint64_t(i)) + Engine::kBlock;
+    if (at < size_t(n)) err2 = std::max(err2, double(std::fabs(got[size_t(i)] - out[kOutLFE][at])));
+  }
+  CHECK(err2 < 1e-6, "out_sub differs from the LFE output by %g", err2);
+  CHECK(rc_shared_audio_read_latest(h, RC_AUDIO_IN_L, got.data(), cap) == 0, "oversized read must be refused");
+}
+
 static void test_minphase() {
   printf("minimum-phase FIR\n");
   auto grid = log_grid(10, 24000, 48);
@@ -443,6 +503,7 @@ int main() {
   test_two_stage_convolver();
   test_engine_crossover();
   test_lfe();
+  test_shared_audio();
   test_minphase();
   test_deconvolution();
   test_design();

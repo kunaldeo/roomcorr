@@ -8,8 +8,13 @@
 #include <cstdlib>
 #include <cmath>
 #include <csignal>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <memory>
 
 #include <pipewire/pipewire.h>
@@ -46,6 +51,41 @@ int64_t now_ms() {
 
 double lin_to_db(double v) { return v > 1e-6 ? 20 * std::log10(v) : -120.0; }
 
+// Creates the shared-audio object that other programs read (see
+// include/roomcorr/shared_audio.h). Returns null if shared memory isn't
+// available; the engine then simply doesn't publish.
+rc_shared_audio_header* create_shared_audio(const std::string& name, size_t& bytes) {
+  constexpr uint32_t kCapacity = 1u << 16;  // 1.37 s at 48 kHz
+  constexpr uint32_t kHeader = 256;
+  static_assert(sizeof(rc_shared_audio_header) <= kHeader, "header grew");
+  bytes = kHeader + size_t(RC_AUDIO_CHANNELS) * kCapacity * sizeof(float);
+  shm_unlink(name.c_str());  // a stale object from a crashed run
+  int fd = shm_open(name.c_str(), O_CREAT | O_EXCL | O_RDWR, 0644);
+  if (fd < 0) return nullptr;
+  if (ftruncate(fd, off_t(bytes)) != 0) {
+    close(fd);
+    shm_unlink(name.c_str());
+    return nullptr;
+  }
+  void* mem = mmap(nullptr, bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+  close(fd);
+  if (mem == MAP_FAILED) {
+    shm_unlink(name.c_str());
+    return nullptr;
+  }
+  std::memset(mem, 0, bytes);
+  auto* h = static_cast<rc_shared_audio_header*>(mem);
+  std::memcpy(h->magic, RC_SHARED_AUDIO_MAGIC, sizeof(h->magic));
+  h->version = RC_SHARED_AUDIO_VERSION;
+  h->header_size = kHeader;
+  h->sample_rate = kSampleRate;
+  h->channels = RC_AUDIO_CHANNELS;
+  h->capacity = kCapacity;
+  const char* names[RC_AUDIO_CHANNELS] = {"in_l", "in_r", "out_l", "out_r", "out_sub"};
+  for (int c = 0; c < RC_AUDIO_CHANNELS; ++c) std::strncpy(h->channel_names[c], names[c], 7);
+  return h;
+}
+
 class Daemon {
 public:
   int run();
@@ -78,6 +118,9 @@ private:
 
   Engine engine_;
   SpectrumAnalyzer analyzer_;
+  rc_shared_audio_header* shared_ = nullptr;
+  size_t shared_bytes_ = 0;
+  std::string shared_name_;
   Config cfg_;
   ControlServer control_;
   std::string capture_state_ = "unconnected", playback_state_ = "unconnected";
@@ -437,6 +480,15 @@ int Daemon::run() {
   none.output_device = cfg_.output_device;
   apply_config(none, true);
 
+  shared_name_ = std::string(RC_SHARED_AUDIO_NAME) + (instance_suffix().empty() ? "" : "-" + instance_suffix().substr(1));
+  shared_ = create_shared_audio(shared_name_, shared_bytes_);
+  if (shared_) {
+    engine_.set_shared_audio(shared_);
+    fprintf(stderr, "roomcorr: sharing live audio at /dev/shm%s\n", shared_name_.c_str());
+  } else {
+    fprintf(stderr, "roomcorr: shared audio unavailable: %s\n", strerror(errno));
+  }
+
   if (!create_playback() || !create_capture()) {
     fprintf(stderr, "roomcorr: cannot create streams\n");
     return 1;
@@ -458,6 +510,11 @@ int Daemon::run() {
   if (capture_) pw_stream_destroy(capture_);
   if (playback_) pw_stream_destroy(playback_);
   pw_core_disconnect(core_);
+  if (shared_) {
+    // Streams are gone, so the audio thread no longer writes.
+    munmap(shared_, shared_bytes_);
+    shm_unlink(shared_name_.c_str());
+  }
   pw_context_destroy(context_);
   pw_main_loop_destroy(main_loop_);
   return exit_code_;

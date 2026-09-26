@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "config.hpp"
+#include "roomcorr/shared_audio.h"
 #include "dsp/biquad.hpp"
 #include "dsp/convolver.hpp"
 
@@ -78,6 +79,11 @@ public:
   // Non-realtime: copies the newest n (<= kTapSize) samples of a tap.
   void read_tap(int tap, float* dst, int n) const;
 
+  // Publishes live audio (input L/R and the corrected outputs) into a
+  // shared-memory ring for other programs; see include/roomcorr/shared_audio.h.
+  // Set before audio starts; null disables it.
+  void set_shared_audio(rc_shared_audio_header* h) { shared_ = h; }
+
   // Realtime. in and out: kNumOut planar channels (FL FR FC LFE RL RR);
   // null input pointers are silence.
   void process(const float* const* in, float* const* out, int n);
@@ -108,6 +114,7 @@ private:
   std::vector<float> delay_buf_[kNumChans];
   int delay_pos_ = 0;
   float bm_[kNumChans][kBlock] = {};  // per-output working buffers
+  float bm_sub_out_[kBlock] = {};     // final sub signal of the block (for sharing)
 
   // Smoothed gains (per sample one-pole)
   double g_pre_ = 1, g_ch_[kNumChans] = {1, 1, 1}, g_mix_ = 1, g_mute_ = 1;
@@ -118,6 +125,8 @@ private:
   // Coefficients currently applied, to detect changes.
   double cur_xover_ = -1, cur_bass_ = 1e9, cur_treble_ = 1e9;
   int cur_slope_ = -1;
+
+  rc_shared_audio_header* shared_ = nullptr;
 
   std::vector<float> tap_[kNumTaps];
   std::atomic<uint32_t> tap_pos_{0};

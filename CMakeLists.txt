@@ -31,7 +31,7 @@ add_library(roomcorr_core STATIC
   src/wav.cpp
   src/design.cpp
 )
-target_include_directories(roomcorr_core PUBLIC src)
+target_include_directories(roomcorr_core PUBLIC src include)
 target_link_libraries(roomcorr_core PUBLIC PkgConfig::FFTW PkgConfig::SNDFILE Threads::Threads)
 target_compile_options(roomcorr_core PRIVATE -O3)
 
@@ -55,3 +55,4 @@ add_executable(roomcorr_bench tests/bench.cpp)
 target_link_libraries(roomcorr_bench PRIVATE roomcorr_core)
 
 install(TARGETS roomcorr RUNTIME DESTINATION bin)
+install(FILES include/roomcorr/shared_audio.h DESTINATION include/roomcorr)
