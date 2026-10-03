@@ -101,6 +101,7 @@ private:
 
   bool create_capture();
   bool create_playback();
+  bool connect_playback();
   void apply_config(const Config& old, bool force_filters);
   void load_filters();
   Json handle(int client, const Json& req);
@@ -124,6 +125,7 @@ private:
   Config cfg_;
   ControlServer control_;
   std::string capture_state_ = "unconnected", playback_state_ = "unconnected";
+  int64_t reconnect_at_ = 0;  // when to retry the output stream (0 = connected)
   std::string filter_status_ = "none";
   int64_t save_due_ = 0;
   int64_t quiet_until_ = 0;  // measurement mute lease (not saved)
@@ -206,10 +208,23 @@ void Daemon::on_capture_state(void* data, pw_stream_state, pw_stream_state state
   if (error) fprintf(stderr, "roomcorr: sink stream: %s\n", error);
 }
 
-void Daemon::on_playback_state(void* data, pw_stream_state, pw_stream_state state, const char* error) {
+void Daemon::on_playback_state(void* data, pw_stream_state old, pw_stream_state state, const char* error) {
   auto* self = static_cast<Daemon*>(data);
   self->playback_state_ = pw_stream_state_as_string(state);
   if (error) fprintf(stderr, "roomcorr: output stream: %s\n", error);
+  // The X4 isn't there (yet): at boot it can appear after us, and it can be
+  // unplugged. Keep retrying from the timer until it's back.
+  const bool lost = state == PW_STREAM_STATE_ERROR ||
+                    (state == PW_STREAM_STATE_UNCONNECTED &&
+                     (old == PW_STREAM_STATE_PAUSED || old == PW_STREAM_STATE_STREAMING));
+  if (lost && !self->reconnect_at_) {
+    fprintf(stderr, "roomcorr: output device unavailable; retrying every 2 s\n");
+    self->reconnect_at_ = now_ms() + 2000;
+  }
+  if (state == PW_STREAM_STATE_STREAMING || state == PW_STREAM_STATE_PAUSED) {
+    if (self->reconnect_at_) fprintf(stderr, "roomcorr: output device connected\n");
+    self->reconnect_at_ = 0;
+  }
 }
 
 bool Daemon::create_capture() {
@@ -264,7 +279,12 @@ bool Daemon::create_playback() {
   events.process = on_playback_process;
   events.state_changed = on_playback_state;
   pw_stream_add_listener(playback_, &playback_listener_, &events, this);
+  return connect_playback();
+}
 
+// (Re)connects the output stream. The same stream object is reused, since
+// the sink's real-time callback holds a pointer to it.
+bool Daemon::connect_playback() {
   uint8_t buf[1024];
   spa_pod_builder b = SPA_POD_BUILDER_INIT(buf, sizeof buf);
   const uint32_t pos[6] = {SPA_AUDIO_CHANNEL_FL, SPA_AUDIO_CHANNEL_FR, SPA_AUDIO_CHANNEL_FC,
@@ -430,6 +450,11 @@ void Daemon::on_timer(void* data, uint64_t) {
   if (self->quiet_until_ && now >= self->quiet_until_) {
     self->quiet_until_ = 0;
     self->push_params();
+  }
+  if (self->reconnect_at_ && now >= self->reconnect_at_) {
+    self->reconnect_at_ = now + 2000;  // cleared once it's streaming
+    pw_stream_disconnect(self->playback_);
+    self->connect_playback();
   }
   if (self->save_due_ && now >= self->save_due_) {
     self->save_due_ = 0;
